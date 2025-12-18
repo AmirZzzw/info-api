@@ -16,7 +16,6 @@ import string
 import random
 import codecs
 import urllib3
-import threading
 import os
 
 app = Flask(__name__)
@@ -26,8 +25,6 @@ AES_KEY = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94,
 AES_IV = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 77, 37])
 GARENA_KEY = bytes.fromhex("32656534343831396539623435393838343531343130363762323831363231383734643064356437616639643866376530306331653534373135623764316533")
 
-REGION_LANG = {"ME": "ar", "IND": "hi", "ID": "id", "VN": "vi", "TH": "th", 
-               "BD": "bn", "PK": "ur", "TW": "zh", "CIS": "ru", "SAC": "es", "BR": "pt"}
 ACCOUNT_NAME_PREFIX = "SidkaShop"
 PASSWORD_PREFIX = "SidkaShop"
 GARENA_ENCODED = "U0lES0FTSE9Q"
@@ -36,14 +33,14 @@ GARENA_ENCODED = "U0lES0FTSE9Q"
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ========== TOKEN MANAGER ==========
-class TokenManager:
+# ========== SIMPLE TOKEN MANAGER ==========
+class SimpleTokenManager:
     def __init__(self):
         self.tokens = {}  # {region: {"token": "...", "expiry": timestamp}}
         self.lock = threading.Lock()
     
     def get_token(self, region):
-        """Get JWT token for region, create if expired"""
+        """Get access_token (not JWT)"""
         with self.lock:
             region = region.upper()
             now = time.time()
@@ -51,77 +48,43 @@ class TokenManager:
             # Check if we have a valid token
             if region in self.tokens:
                 token_data = self.tokens[region]
-                # Check if token is still valid (10 minutes)
+                # Check if token is still valid (30 minutes)
                 if token_data["expiry"] > now:
-                    print(f"🔑 Using cached JWT token for {region}")
+                    print(f"🔑 Using cached access_token for {region}")
                     return token_data["token"]
             
             # Create new token
-            print(f"🔄 No valid token for {region}, creating fresh...")
-            token = self._create_fresh_jwt(region)
-            if token:
-                # Store for 10 minutes
+            print(f"🔄 Creating fresh access_token for {region}")
+            token_data = self._create_fresh_access_token(region)
+            if token_data:
+                # Store for 30 minutes
                 self.tokens[region] = {
-                    "token": token,
-                    "expiry": now + 600  # 10 minutes
+                    "token": token_data["access_token"],
+                    "expiry": now + 1800  # 30 minutes
                 }
-                print(f"✅ JWT Token stored for {region}")
-                return token
+                print(f"✅ access_token stored for {region}")
+                return token_data["access_token"]
             return None
     
-    def _create_fresh_jwt(self, region):
-        """Create a fresh JWT token"""
+    def _create_fresh_access_token(self, region):
+        """Create a fresh access_token (simple)"""
         try:
-            print(f"🔄 Creating fresh account for {region}")
-            
-            # Step 1: Create guest account
+            print(f"🔄 Step 1: Creating guest account")
             guest_data = create_acc(region)
             if not guest_data:
-                print("❌ Failed to create guest account")
                 return None
             
-            # Step 2: Get access token
+            print(f"🔄 Step 2: Getting access_token")
             token_data = token_grant(guest_data['uid'], guest_data['password'])
-            if not token_data:
-                print("❌ Failed to get access token")
-                return None
-            
-            # Step 3: MajorRegister
-            print(f"🔄 Registering account...")
-            register_result = major_register(
-                token_data['access_token'], 
-                token_data['open_id'], 
-                region
-            )
-            
-            if not register_result:
-                print("⚠️ MajorRegister failed, but continuing...")
-            
-            # Step 4: MajorLogin for JWT
-            print(f"🔄 Logging in for JWT...")
-            login_data = major_login(
-                guest_data['uid'], 
-                guest_data['password'], 
-                token_data['access_token'], 
-                token_data['open_id'], 
-                region
-            )
-            
-            if login_data and login_data.get('jwt_token'):
-                print(f"✅ JWT Token obtained")
-                return login_data['jwt_token']
-            
-            print(f"❌ Failed to get JWT token")
-            return None
+            return token_data
             
         except Exception as e:
-            print(f"❌ JWT creation failed: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Token creation failed: {e}")
             return None
 
-# ایجاد global instance
-token_manager = TokenManager()
+# Import threading
+import threading
+token_manager = SimpleTokenManager()
 
 # ========== ACCOUNT FUNCTIONS ==========
 def generate_random_name(base_name):
@@ -140,70 +103,6 @@ def generate_custom_password(prefix):
     random_part1 = ''.join(random.choice(characters) for _ in range(5))
     random_part2 = ''.join(random.choice(characters) for _ in range(5))
     return f"{prefix}_{random_part1}_{garena_decoded}_{random_part2}"
-
-def EnC_Vr(N):
-    """Varint encoding"""
-    if N < 0: 
-        return b''
-    H = []
-    while True:
-        BesTo = N & 0x7F 
-        N >>= 7
-        if N: 
-            BesTo |= 0x80
-        H.append(BesTo)
-        if not N: 
-            break
-    return bytes(H)
-
-def CrEaTe_VarianT(field_number, value):
-    """Create variant field"""
-    field_header = (field_number << 3) | 0
-    return EnC_Vr(field_header) + EnC_Vr(value)
-
-def CrEaTe_LenGTh(field_number, value):
-    """Create length-delimited field"""
-    field_header = (field_number << 3) | 2
-    encoded_value = value.encode() if isinstance(value, str) else value
-    return EnC_Vr(field_header) + EnC_Vr(len(encoded_value)) + encoded_value
-
-def CrEaTe_ProTo(fields):
-    """Create protobuf message"""
-    packet = bytearray()    
-    for field, value in fields.items():
-        if isinstance(value, dict):
-            nested_packet = CrEaTe_ProTo(value)
-            packet.extend(CrEaTe_LenGTh(field, nested_packet))
-        elif isinstance(value, int):
-            packet.extend(CrEaTe_VarianT(field, value))           
-        elif isinstance(value, str) or isinstance(value, bytes):
-            packet.extend(CrEaTe_LenGTh(field, value))           
-    return packet
-
-def encrypt_api(plain_text):
-    """Encrypt for API"""
-    plain_text = bytes.fromhex(plain_text)
-    key_bytes = AES_KEY
-    iv = AES_IV
-    cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
-    cipher_text = cipher.encrypt(pad(plain_text, AES.block_size))
-    return cipher_text.hex()
-
-def encode_string(original):
-    """Encode string for field_14"""
-    keystream = [0x30, 0x30, 0x30, 0x32, 0x30, 0x31, 0x37, 0x30, 0x30, 0x30, 0x30, 0x30, 0x32, 0x30, 0x31, 0x37,
-                 0x30, 0x30, 0x30, 0x30, 0x30, 0x32, 0x30, 0x31, 0x37, 0x30, 0x30, 0x30, 0x30, 0x30, 0x32, 0x30]
-    encoded = ""
-    for i in range(len(original)):
-        orig_byte = ord(original[i])
-        key_byte = keystream[i % len(keystream)]
-        result_byte = orig_byte ^ key_byte
-        encoded += chr(result_byte)
-    return {"open_id": original, "field_14": encoded}
-
-def to_unicode_escaped(s):
-    """Convert to unicode escaped"""
-    return ''.join(c if 32 <= ord(c) <= 126 else f'\\u{ord(c):04x}' for c in s)
 
 def create_acc(region, max_retries=3):
     """Create guest account"""
@@ -229,7 +128,7 @@ def create_acc(region, max_retries=3):
                 result = response.json()
                 if 'uid' in result:
                     uid = result['uid']
-                    print(f"[1/4] Guest account created: {uid}")
+                    print(f"[1/2] Guest account created: {uid}")
                     return {"uid": uid, "password": password}
             else:
                 print(f"[ATTEMPT {attempt + 1}/{max_retries}] Create account failed: {response.status_code}")
@@ -266,414 +165,19 @@ def token_grant(uid, password):
         response = requests.post(url, headers=headers, data=body, timeout=30, verify=False)
         response.raise_for_status()
         
-        if 'open_id' in response.json():
-            open_id = response.json()['open_id']
-            access_token = response.json()["access_token"]
-            print(f"[2/4] Token granted: {access_token[:30]}...")
+        result = response.json()
+        access_token = result.get("access_token")
+        open_id = result.get("open_id")
+        
+        if access_token and open_id:
+            print(f"[2/2] access_token obtained: {access_token[:30]}...")
             return {"access_token": access_token, "open_id": open_id}
         return None
     except Exception as e:
         print(f"[ERROR] Token grant failed: {e}")
         return None
 
-def major_register(access_token, open_id, region):
-    """MajorRegister"""
-    try:
-        if region.upper() in ["ME", "TH"]:
-            url = "https://loginbp.common.ggbluefox.com/MajorRegister"
-        else:
-            url = "https://loginbp.ggblueshark.com/MajorRegister"
-        
-        name = generate_random_name(ACCOUNT_NAME_PREFIX)
-        
-        headers = {
-            "Accept-Encoding": "gzip",
-            "Authorization": "Bearer",   
-            "Connection": "Keep-Alive",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
-            "ReleaseVersion": "OB51",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
-            "X-GA": "v1 1",
-            "X-Unity-Version": "2018.4."
-        }
-
-        lang_code = REGION_LANG.get(region.upper(), "en")
-        payload = {
-            1: name,
-            2: access_token,
-            3: open_id,
-            5: 102000007,
-            6: 4,
-            7: 1,
-            13: 1,
-            14: codecs.decode(to_unicode_escaped(encode_string(open_id)['field_14']), 'unicode_escape').encode('latin1'),
-            15: lang_code,
-            16: 1,
-            17: 1
-        }
-
-        payload_bytes = CrEaTe_ProTo(payload)
-        encrypted_payload = binascii.hexlify(payload_bytes).decode()
-        
-        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypt_api(encrypted_payload)), verify=False, timeout=30)
-        
-        if response.status_code == 200:
-            print(f"[3/4] Registered: {name}")
-            return {"name": name}
-        else:
-            print(f"[WARNING] Register status: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"[ERROR] Register error: {e}")
-        return None
-
-def major_login(uid, password, access_token, open_id, region):
-    """MajorLogin to get JWT Token"""
-    try:
-        lang = REGION_LANG.get(region.upper(), "en")
-        
-        payload_parts = [
-            b'\x1a\x132025-08-30 05:19:21"\tfree fire(\x01:\x081.114.13B2Android OS 9 / API-28 (PI/rel.cjw.20220518.114133)J\x08HandheldR\nATM MobilsZ\x04WIFI`\xb6\nh\xee\x05r\x03300z\x1fARMv7 VFPv3 NEON VMH | 2400 | 2\x80\x01\xc9\x0f\x8a\x01\x0fAdreno (TM) 640\x92\x01\rOpenGL ES 3.2\x9a\x01+Google|dfa4ab4b-9dc4-454e-8065-e70c733fa53f\xa2\x01\x0e105.235.139.91\xaa\x01\x02',
-            lang.encode("ascii"),
-            b'\xb2\x01 1d8ec0240ede109973f3321b9354b44d\xba\x01\x014\xc2\x01\x08Handheld\xca\x01\x10Asus ASUS_I005DA\xea\x01@afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390\xf0\x01\x01\xca\x02\nATM Mobils\xd2\x02\x04WIFI\xca\x03 7428b253defc164018c604a1ebbfebdf\xe0\x03\xa8\x81\x02\xe8\x03\xf6\xe5\x01\xf0\x03\xaf\x13\xf8\x03\x84\x07\x80\x04\xe7\xf0\x01\x88\x04\xa8\x81\x02\x90\x04\xe7\xf0\x01\x98\x04\xa8\x81\x02\xc8\x04\x01\xd2\x04=/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/lib/arm\xe0\x04\x01\xea\x04_2087f61c19f57f2af4e7feff0b24d9d9|/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019118692\xb2\x05\tOpenGLES2\xb8\x05\xff\x7f\xc0\x05\x04\xe0\x05\xf3F\xea\x05\x07android\xf2\x05pKqsHT5ZLWrYljNb5Vqh//yFRlaPHSO9NWSQsVvOmdhEEn7W+VHNUK+Q+fduA3ptNrGB0Ll0LRz3WW0jOwesLj6aiU7sZ40p8BfUE/FI/jzSTwRe2\xf8\x05\xfb\xe4\x06\x88\x06\x01\x90\x06\x01\x9a\x06\x014\xa2\x06\x014\xb2\x06"GQ@O\x00\x0e^\x00D\x06UA\x0ePM\r\x13hZ\x07T\x06\x0cm\\V\x0ejYV;\x0bU5'
-        ]
-        
-        payload = b''.join(payload_parts)
-        
-        if region.upper() in ["ME", "TH"]:
-            url = "https://loginbp.common.ggbluefox.com/MajorLogin"
-        else:
-            url = "https://loginbp.ggblueshark.com/MajorLogin"
-        
-        headers = {
-            "Accept-Encoding": "gzip",
-            "Authorization": "Bearer",
-            "Connection": "Keep-Alive",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
-            "ReleaseVersion": "OB51",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
-            "X-GA": "v1 1",
-            "X-Unity-Version": "2018.4.11f1"
-        }
-
-        data = payload
-        data = data.replace(b'afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390', access_token.encode())
-        data = data.replace(b'1d8ec0240ede109973f3321b9354b44d', open_id.encode())
-        
-        print(f"🔍 MajorLogin - Token: {access_token[:30]}..., OpenID: {open_id[:20]}...")
-        
-        encrypted = encrypt_api(data.hex())
-        final_payload = bytes.fromhex(encrypted)
-
-        response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
-        
-        print(f"🔍 MajorLogin Status: {response.status_code}")
-        print(f"🔍 Response preview: {response.text[:200]}")
-        
-        if response.status_code == 200 and len(response.text) > 10:
-            # Look for JWT
-            import re
-            jwt_pattern = r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
-            match = re.search(jwt_pattern, response.text)
-            
-            if match:
-                jwt_token = match.group(0)
-                print(f"[4/4] JWT obtained: {jwt_token[:50]}...")
-                return {"jwt_token": jwt_token}
-        
-        return None
-    except Exception as e:
-        print(f"[ERROR] MajorLogin failed: {e}")
-        return None
-
-# بعد از تابع major_login، این تابع رو اضافه کن:
-def extract_full_jwt(response_text):
-    """Extract complete JWT token from response"""
-    try:
-        import re
-        # Pattern for JWT
-        jwt_pattern = r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
-        match = re.search(jwt_pattern, response_text)
-        
-        if match:
-            jwt_token = match.group(0)
-            print(f"🔍 Extracted JWT: {jwt_token[:80]}...")
-            
-            # Decode to see what's in it
-            try:
-                parts = jwt_token.split('.')
-                if len(parts) >= 2:
-                    import base64
-                    payload_part = parts[1]
-                    padding = 4 - len(payload_part) % 4
-                    if padding != 4:
-                        payload_part += '=' * padding
-                    decoded = base64.urlsafe_b64decode(payload_part)
-                    payload = json.loads(decoded)
-                    print(f"🔍 JWT Payload: {payload}")
-            except:
-                pass
-            
-            return jwt_token
-        return None
-    except Exception as e:
-        print(f"❌ JWT extraction failed: {e}")
-        return None
-
-# تابع major_login رو آپدیت کن:
-def major_login(uid, password, access_token, open_id, region):
-    """MajorLogin to get JWT Token"""
-    try:
-        lang = REGION_LANG.get(region.upper(), "en")
-        
-        payload_parts = [
-            b'\x1a\x132025-08-30 05:19:21"\tfree fire(\x01:\x081.114.13B2Android OS 9 / API-28 (PI/rel.cjw.20220518.114133)J\x08HandheldR\nATM MobilsZ\x04WIFI`\xb6\nh\xee\x05r\x03300z\x1fARMv7 VFPv3 NEON VMH | 2400 | 2\x80\x01\xc9\x0f\x8a\x01\x0fAdreno (TM) 640\x92\x01\rOpenGL ES 3.2\x9a\x01+Google|dfa4ab4b-9dc4-454e-8065-e70c733fa53f\xa2\x01\x0e105.235.139.91\xaa\x01\x02',
-            lang.encode("ascii"),
-            b'\xb2\x01 1d8ec0240ede109973f3321b9354b44d\xba\x01\x014\xc2\x01\x08Handheld\xca\x01\x10Asus ASUS_I005DA\xea\x01@afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390\xf0\x01\x01\xca\x02\nATM Mobils\xd2\x02\x04WIFI\xca\x03 7428b253defc164018c604a1ebbfebdf\xe0\x03\xa8\x81\x02\xe8\x03\xf6\xe5\x01\xf0\x03\xaf\x13\xf8\x03\x84\x07\x80\x04\xe7\xf0\x01\x88\x04\xa8\x81\x02\x90\x04\xe7\xf0\x01\x98\x04\xa8\x81\x02\xc8\x04\x01\xd2\x04=/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/lib/arm\xe0\x04\x01\xea\x04_2087f61c19f57f2af4e7feff0b24d9d9|/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019118692\xb2\x05\tOpenGLES2\xb8\x05\xff\x7f\xc0\x05\x04\xe0\x05\xf3F\xea\x05\x07android\xf2\x05pKqsHT5ZLWrYljNb5Vqh//yFRlaPHSO9NWSQsVvOmdhEEn7W+VHNUK+Q+fduA3ptNrGB0Ll0LRz3WW0jOwesLj6aiU7sZ40p8BfUE/FI/jzSTwRe2\xf8\x05\xfb\xe4\x06\x88\x06\x01\x90\x06\x01\x9a\x06\x014\xa2\x06\x014\xb2\x06"GQ@O\x00\x0e^\x00D\x06UA\x0ePM\r\x13hZ\x07T\x06\x0cm\\V\x0ejYV;\x0bU5'
-        ]
-        
-        payload = b''.join(payload_parts)
-        
-        if region.upper() in ["ME", "TH"]:
-            url = "https://loginbp.common.ggbluefox.com/MajorLogin"
-        else:
-            url = "https://loginbp.ggblueshark.com/MajorLogin"
-        
-        headers = {
-            "Accept-Encoding": "gzip",
-            "Authorization": "Bearer",
-            "Connection": "Keep-Alive",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
-            "ReleaseVersion": "OB51",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
-            "X-GA": "v1 1",
-            "X-Unity-Version": "2018.4.11f1"
-        }
-
-        data = payload
-        data = data.replace(b'afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390', access_token.encode())
-        data = data.replace(b'1d8ec0240ede109973f3321b9354b44d', open_id.encode())
-        
-        print(f"🔍 MajorLogin - Token: {access_token[:30]}..., OpenID: {open_id}")
-        
-        encrypted = encrypt_api(data.hex())
-        final_payload = bytes.fromhex(encrypted)
-
-        response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
-        
-        print(f"🔍 MajorLogin Status: {response.status_code}")
-        print(f"🔍 Response length: {len(response.text)}")
-        
-        if response.status_code == 200 and len(response.text) > 10:
-            # Extract JWT
-            jwt_token = extract_full_jwt(response.text)
-            
-            if jwt_token:
-                print(f"[4/4] JWT obtained (full)")
-                return {"jwt_token": jwt_token}
-            else:
-                print(f"⚠️ No JWT found in response")
-                print(f"🔍 Response preview: {response.text[:300]}")
-        
-        return None
-    except Exception as e:
-        print(f"[ERROR] MajorLogin failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-        
-# تابع call_api_with_jwt رو آپدیت کن:
-def call_api_with_jwt(idd, region):
-    """Call API with JWT token"""
-    # Get JWT token
-    jwt_token = token_manager.get_token(region)
-    if not jwt_token:
-        raise Exception(f"Failed to get JWT token")
-    
-    # Extract actual region from JWT
-    actual_region = extract_region_from_jwt(jwt_token)
-    print(f"🔍 Using region from JWT: {actual_region}")
-    
-    endpoint = get_api_endpoint(actual_region)
-    
-    headers = {
-        'User-Agent': 'UnityPlayer/2018.4.11f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)',
-        'Authorization': f'Bearer {jwt_token}',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-Unity-Version': '2018.4.11f1',
-    }
-    
-    try:
-        data = bytes.fromhex(idd)
-        
-        response = requests.post(
-            endpoint, 
-            headers=headers, 
-            data=data, 
-            timeout=15,
-            verify=False
-        )
-        
-        print(f"🔍 API Response Status: {response.status_code}")
-        print(f"🔍 Response headers: {dict(response.headers)}")
-        
-        if response.status_code == 200:
-            return response.content.hex()
-        elif response.status_code == 401:
-            # شاید مشکل از signature_md5 در JWT باشه
-            print(f"⚠️ 401 Error - Checking JWT payload...")
-            
-            # Decode JWT to see signature
-            parts = jwt_token.split('.')
-            if len(parts) >= 2:
-                import base64
-                payload_part = parts[1]
-                padding = 4 - len(payload_part) % 4
-                if padding != 4:
-                    payload_part += '=' * padding
-                decoded = base64.urlsafe_b64decode(payload_part)
-                payload = json.loads(decoded)
-                print(f"🔍 JWT Payload for debugging: {payload}")
-            
-            raise Exception(f"API returned 401 - JWT might be invalid")
-        else:
-            raise Exception(f"API returned {response.status_code}")
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ API request failed: {e}")
-        raise
-
-# تابع get_api_endpoint رو چک کن:
-def get_api_endpoint(region):
-    """Get API endpoint based on region"""
-    region = region.upper()
-    
-    # برای region ME، چند endpoint مختلف رو امتحان کن
-    if region == "ME":
-        endpoints = [
-            "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
-            "https://client.me.freefiremobile.com/GetPlayerPersonalShow",
-            "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"  # fallback
-        ]
-        return endpoints[0]  # اولی رو امتحان کن
-    
-    endpoints = {
-        "IND": "https://client.ind.freefiremobile.com/GetPlayerPersonalShow",
-        "BR": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "US": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "SAC": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "NA": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "TH": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
-        "default": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
-    }
-    return endpoints.get(region, endpoints["default"])
-
-def decode_jwt_token(jwt_token):
-    """Decode JWT token"""
-    try:
-        parts = jwt_token.split('.')
-        if len(parts) >= 2:
-            payload_part = parts[1]
-            padding = 4 - len(payload_part) % 4
-            if padding != 4:
-                payload_part += '=' * padding
-            decoded = base64.urlsafe_b64decode(payload_part)
-            data = json.loads(decoded)
-            account_id = data.get('account_id') or data.get('external_id')
-            if account_id:
-                return str(account_id)
-    except Exception as e:
-        print(f"[WARNING] JWT decode failed: {e}")
-    return "N/A"
-
-# ========== API FUNCTIONS ==========
-# تابع get_api_endpoint رو تغییر بده:
-def get_api_endpoint(region):
-    """Get API endpoint - همیشه از SG استفاده کن"""
-    # از JWT payload می‌بینیم که region همیشه SG هست
-    return "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
-
-# یا اگر می‌خوای region رو از JWT extract کنی:
-def extract_region_from_jwt(jwt_token):
-    """Extract region from JWT payload"""
-    try:
-        parts = jwt_token.split('.')
-        if len(parts) >= 2:
-            import base64
-            payload_part = parts[1]
-            padding = 4 - len(payload_part) % 4
-            if padding != 4:
-                payload_part += '=' * padding
-            decoded = base64.urlsafe_b64decode(payload_part)
-            payload = json.loads(decoded)
-            return payload.get('noti_region', 'SG')
-    except:
-        pass
-    return 'SG'
-
-# یک endpoint جدید برای تست مستقیم API اضافه کن:
-@app.route('/direct_test', methods=['GET'])
-def direct_test():
-    """Test API directly with a known working JWT"""
-    try:
-        uid = request.args.get('uid', '4285785816')
-        
-        # این JWT رو از لاگ قبلی کپی کن (از payload)
-        test_jwt = "eyJhbGciOiJIUzI1NiIsInN2ciI6IiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoxNDE1MzU4NDkwMSwibmlja25hbWUiOiJTaWRrYVNo4oG44oKy4oKy4oG34oG0Iiwibm90aV9yZWdpb24iOiJTRyIsImxvY2tfcmVnaW9uIjoiIiwiZXh0ZXJuYWxfaWQiOiJhMzQ4ZWM0M2JkZDU5M2MzNTdmNzA2NGJhNGM0YTRmYyIsImV4dGVJuYWxfdHlwZSI6NCwicGxhdF9pZCI6MSwiY2xpZW50X3ZlcnNpb24iOiIxLjExNC4xMyIsImVtdWxhdG9yX3Njb3JlIjoxMDAsImlzX2VtdWxhdG9yIjp0cnVlLCJjb3VudHJ5X2NvZGUiOiJVUyIsImV4dGVybmFsX3VpZCI6NDM0ODIyNDY4MiwicmVnX2F2YXRhciI6MTAyMDAwMDA3LCJzb3VyY2UiOjAsImxvY2tfcmVnaW9uX3RpbWUiOjAsImNsaWVudF90eXBlIjoyLCJzaWduYXR1cmVfbWQ1IjoiNzQyOGIyNTNkZWZjMTY0MDE4YzYwNGExZWJiZmViZGYiLCJ1c2luZ192ZXJzaW9uIjoxLCJyZWxlYXNlX2NoYW5uZWwiOiJhbmRyb2lkIiwicmVsZWFzZV92ZXJzaW9uIjoiT0I1MSIsImV4cCI6MTc2NjEyNTE0NX0"
-        
-        # Create protobuf
-        message = uid_generator_pb2.uid_generator()
-        message.saturn_ = int(uid)
-        message.garena = 1
-        protobuf_data = message.SerializeToString()
-        hex_data = binascii.hexlify(protobuf_data).decode()
-        encrypted_hex = encrypt_aes(hex_data)
-        
-        # Call API با JWT تست
-        endpoint = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
-        headers = {
-            'User-Agent': 'UnityPlayer/2018.4.11f1',
-            'Authorization': f'Bearer {test_jwt}',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        }
-        
-        response = requests.post(
-            endpoint,
-            headers=headers,
-            data=bytes.fromhex(encrypted_hex),
-            timeout=15,
-            verify=False
-        )
-        
-        print(f"🔍 Direct Test Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            # Parse response
-            message = AccountPersonalShowInfo()
-            message.ParseFromString(response.content)
-            result = MessageToDict(message)
-            
-            return jsonify({
-                "success": True,
-                "status": response.status_code,
-                "data": result
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "status": response.status_code,
-                "error": response.text[:200]
-            }), 500
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+# ========== ENCRYPTION FUNCTIONS ==========
 def encrypt_aes(hex_data):
     """Encrypt data with AES"""
     cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
@@ -681,131 +185,16 @@ def encrypt_aes(hex_data):
     encrypted_data = cipher.encrypt(padded_data)
     return binascii.hexlify(encrypted_data).decode()
 
-def call_api_with_jwt(idd, region):
-    """Call API with JWT token"""
-    # Get JWT token
-    jwt_token = token_manager.get_token(region)
-    if not jwt_token:
-        raise Exception(f"Failed to get JWT token for region {region}")
-    
-    endpoint = get_api_endpoint(region)
-    
-    headers = {
-        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-        'Connection': 'Keep-Alive',
-        'Expect': '100-continue',
-        'Authorization': f'Bearer {jwt_token}',
-        'X-Unity-Version': '2018.4.11f1',
-        'X-GA': 'v1 1',
-        'ReleaseVersion': 'OB49',
-        'Content-Type': 'application/x-www-form-urlencoded',
-    }
-    
-    try:
-        data = bytes.fromhex(idd)
-        
-        response = requests.post(
-            endpoint, 
-            headers=headers, 
-            data=data, 
-            timeout=15,
-            verify=False
-        )
-        
-        print(f"🔍 API Response Status: {response.status_code}")
-        
-        # If 401, clear token and retry once
-        if response.status_code == 401:
-            print(f"⚠️ Token invalid for {region}, clearing cache...")
-            with token_manager.lock:
-                if region in token_manager.tokens:
-                    del token_manager.tokens[region]
-            
-            # Get new token
-            jwt_token = token_manager.get_token(region)
-            if jwt_token:
-                headers['Authorization'] = f'Bearer {jwt_token}'
-                response = requests.post(
-                    endpoint, 
-                    headers=headers, 
-                    data=data, 
-                    timeout=15,
-                    verify=False
-                )
-        
-        if response.status_code != 200:
-            print(f"❌ API Error {response.status_code}")
-            raise Exception(f"API returned {response.status_code}")
-            
-        return response.content.hex()
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ API request failed: {e}")
-        raise
-
-# ========== FLASK ROUTES ==========
-@app.route('/debug_jwt', methods=['GET'])
-def debug_jwt():
-    """Debug endpoint to test JWT creation"""
-    region = request.args.get('region', 'ME').upper()
-    
-    try:
-        # Create a fresh JWT
-        print(f"\n🔍 DEBUG: Creating fresh JWT for {region}")
-        
-        guest_data = create_acc(region)
-        if not guest_data:
-            return jsonify({"error": "Failed to create guest"}), 500
-        
-        token_data = token_grant(guest_data['uid'], guest_data['password'])
-        if not token_data:
-            return jsonify({"error": "Failed to get token"}), 500
-        
-        login_data = major_login(
-            guest_data['uid'], 
-            guest_data['password'], 
-            token_data['access_token'], 
-            token_data['open_id'], 
-            region
-        )
-        
-        if login_data and login_data.get('jwt_token'):
-            jwt_token = login_data['jwt_token']
-            
-            # Decode JWT
-            try:
-                parts = jwt_token.split('.')
-                payload = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (4 - len(parts[1]) % 4)))
-            except:
-                payload = {"error": "Could not decode"}
-            
-            return jsonify({
-                "success": True,
-                "jwt_token": jwt_token,
-                "jwt_parts": len(jwt_token.split('.')),
-                "token_length": len(jwt_token),
-                "payload": payload,
-                "region": region
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": "Failed to get JWT"
-            }), 500
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-        
+# ========== MAIN API CALL ==========
 @app.route('/accinfo', methods=['GET'])
 def get_player_info():
     try:
         uid = request.args.get('uid')
-        region = request.args.get('region', 'ME').upper()
         
         if not uid:
             return jsonify({"error": "UID parameter is required"}), 400
         
-        print(f"\n🎯 REQUEST - UID: {uid}, Region: {region}")
+        print(f"\n🎯 REQUEST - UID: {uid}")
         
         # Create protobuf message
         message = uid_generator_pb2.uid_generator()
@@ -817,22 +206,13 @@ def get_player_info():
         # Encrypt the data
         encrypted_hex = encrypt_aes(hex_data)
         
-        # Call API
-        print(f"📡 Calling API...")
-        api_response = call_api_with_jwt(encrypted_hex, region)
+        # Try different approaches
+        result = try_all_approaches(encrypted_hex, uid)
         
-        if not api_response:
-            return jsonify({"error": "Empty response from API"}), 400
-        
-        # Parse response
-        message = AccountPersonalShowInfo()
-        message.ParseFromString(bytes.fromhex(api_response))
-        
-        # Convert to JSON
-        result = MessageToDict(message)
-        result['Powered By'] = ['Sidka Shop']
-        
-        return jsonify(result)
+        if result:
+            return jsonify(result)
+        else:
+            return jsonify({"error": "All approaches failed"}), 500
         
     except ValueError:
         return jsonify({"error": "Invalid UID format"}), 400
@@ -840,27 +220,185 @@ def get_player_info():
         print(f"❌ Error: {e}")
         return jsonify({"error": f"Failure: {str(e)}"}), 500
 
-@app.route('/test', methods=['GET'])
-def test_endpoint():
-    """Test endpoint"""
-    region = request.args.get('region', 'ME').upper()
+def try_all_approaches(encrypted_hex, uid):
+    """Try different API calling approaches"""
+    
+    approaches = [
+        ("METHOD 1: Direct with access_token", try_direct_access_token),
+        ("METHOD 2: With custom headers", try_custom_headers),
+        ("METHOD 3: Simple POST", try_simple_post),
+    ]
+    
+    for method_name, method_func in approaches:
+        print(f"\n🔄 Trying {method_name}...")
+        try:
+            result = method_func(encrypted_hex)
+            if result:
+                print(f"✅ {method_name} SUCCESS!")
+                result['method_used'] = method_name
+                return result
+        except Exception as e:
+            print(f"❌ {method_name} failed: {e}")
+            continue
+    
+    return None
+
+def try_direct_access_token(encrypted_hex):
+    """Try with direct access_token"""
+    # Get fresh access_token
+    token_data = create_acc_and_token("SG")
+    if not token_data:
+        return None
+    
+    access_token = token_data["access_token"]
+    
+    # Try different endpoints
+    endpoints = [
+        "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
+        "https://client.ind.freefiremobile.com/GetPlayerPersonalShow",
+        "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+    ]
+    
+    headers = {
+        'User-Agent': 'UnityPlayer/2018.4.11f1',
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }
+    
+    for endpoint in endpoints:
+        print(f"🔍 Trying endpoint: {endpoint}")
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                data=bytes.fromhex(encrypted_hex),
+                timeout=15,
+                verify=False
+            )
+            
+            print(f"🔍 Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                return parse_response(response.content)
+            elif response.status_code != 401:
+                print(f"⚠️ Unexpected status: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Endpoint {endpoint} error: {e}")
+    
+    return None
+
+def try_custom_headers(encrypted_hex):
+    """Try with custom headers"""
+    token_data = create_acc_and_token("SG")
+    if not token_data:
+        return None
+    
+    access_token = token_data["access_token"]
+    
+    headers_list = [
+        {
+            'User-Agent': 'UnityPlayer/2018.4.11f1',
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Unity-Version': '2018.4.11f1',
+        },
+        {
+            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-GA': 'v1 1',
+        },
+        {
+            'User-Agent': 'Garena Free Fire',
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+    ]
+    
+    endpoint = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+    
+    for i, headers in enumerate(headers_list):
+        print(f"🔍 Trying header set {i+1}")
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                data=bytes.fromhex(encrypted_hex),
+                timeout=15,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                return parse_response(response.content)
+        except:
+            continue
+    
+    return None
+
+def try_simple_post(encrypted_hex):
+    """Simple POST without auth"""
+    endpoint = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+    
+    headers = {
+        'User-Agent': 'UnityPlayer/2018.4.11f1',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }
     
     try:
-        token = token_manager.get_token(region)
-        if token:
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            data=bytes.fromhex(encrypted_hex),
+            timeout=15,
+            verify=False
+        )
+        
+        if response.status_code == 200:
+            return parse_response(response.content)
+    except:
+        pass
+    
+    return None
+
+def create_acc_and_token(region):
+    """Quick account and token creation"""
+    try:
+        guest_data = create_acc(region)
+        if not guest_data:
+            return None
+        
+        token_data = token_grant(guest_data['uid'], guest_data['password'])
+        return token_data
+    except:
+        return None
+
+def parse_response(content):
+    """Parse protobuf response"""
+    try:
+        message = AccountPersonalShowInfo()
+        message.ParseFromString(content)
+        result = MessageToDict(message)
+        result['Powered By'] = ['Sidka Shop']
+        return result
+    except Exception as e:
+        print(f"❌ Parse error: {e}")
+        return None
+
+# ========== TEST ENDPOINTS ==========
+@app.route('/test_token', methods=['GET'])
+def test_token():
+    """Test token creation"""
+    try:
+        token_data = create_acc_and_token("SG")
+        if token_data:
             return jsonify({
                 "success": True,
-                "region": region,
-                "has_token": True,
-                "token_preview": token[:50] + "...",
-                "is_jwt": token.count('.') == 2
+                "access_token": token_data["access_token"][:50] + "...",
+                "open_id": token_data["open_id"],
+                "length": len(token_data["access_token"])
             })
         else:
-            return jsonify({
-                "success": False,
-                "region": region,
-                "message": "Failed to get token"
-            }), 500
+            return jsonify({"success": False, "error": "Failed"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -868,23 +406,24 @@ def test_endpoint():
 def health():
     return jsonify({
         "status": "healthy",
-        "service": "FreeFire API",
+        "service": "FreeFire API - Multi-approach",
         "timestamp": datetime.now().isoformat()
     })
 
 # ========== MAIN ==========
 if __name__ == "__main__":
     print("=" * 70)
-    print("🚀 FREEFIRE API - JWT TOKEN SYSTEM")
+    print("🚀 FREEFIRE API - MULTI-APPROACH SYSTEM")
+    print("✅ Trying multiple methods to bypass 401")
     print("=" * 70)
     
     port = int(os.environ.get('PORT', 5552))
     
     print(f"\n📡 Starting on http://0.0.0.0:{port}")
     print("\n📋 Endpoints:")
-    print("  GET /accinfo?uid=...&region=...  - Player info")
-    print("  GET /test?region=ME              - Test token")
-    print("  GET /health                      - Health check")
+    print("  GET /accinfo?uid=...  - Player info (tries multiple methods)")
+    print("  GET /test_token       - Test token creation")
+    print("  GET /health           - Health check")
     print("\n" + "=" * 70)
     
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
