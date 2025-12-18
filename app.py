@@ -487,71 +487,63 @@ def major_login(uid, password, access_token, open_id, region):
         import traceback
         traceback.print_exc()
         return None
-
+        
 # تابع call_api_with_jwt رو آپدیت کن:
 def call_api_with_jwt(idd, region):
     """Call API with JWT token"""
     # Get JWT token
     jwt_token = token_manager.get_token(region)
     if not jwt_token:
-        raise Exception(f"Failed to get JWT token for region {region}")
+        raise Exception(f"Failed to get JWT token")
     
-    endpoint = get_api_endpoint(region)
+    # Extract actual region from JWT
+    actual_region = extract_region_from_jwt(jwt_token)
+    print(f"🔍 Using region from JWT: {actual_region}")
     
-    # Headers مختلف رو امتحان کن
-    headers_list = [
-        {
-            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-            'Connection': 'Keep-Alive',
-            'Expect': '100-continue',
-            'Authorization': f'Bearer {jwt_token}',
-            'X-Unity-Version': '2018.4.11f1',
-            'X-GA': 'v1 1',
-            'ReleaseVersion': 'OB49',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        {
-            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-            'Authorization': f'Bearer {jwt_token}',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-Unity-Version': '2018.4.11f1',
-        },
-        {
-            'User-Agent': 'UnityPlayer/2018.4.11f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)',
-            'Authorization': f'Bearer {jwt_token}',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        }
-    ]
+    endpoint = get_api_endpoint(actual_region)
+    
+    headers = {
+        'User-Agent': 'UnityPlayer/2018.4.11f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)',
+        'Authorization': f'Bearer {jwt_token}',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Unity-Version': '2018.4.11f1',
+    }
     
     try:
         data = bytes.fromhex(idd)
         
-        for i, headers in enumerate(headers_list):
-            print(f"🔍 Trying header set {i+1}...")
-            
-            response = requests.post(
-                endpoint, 
-                headers=headers, 
-                data=data, 
-                timeout=15,
-                verify=False
-            )
-            
-            print(f"🔍 API Response Status ({i+1}): {response.status_code}")
-            
-            if response.status_code == 200:
-                print(f"✅ Success with header set {i+1}")
-                return response.content.hex()
-            elif response.status_code == 401:
-                print(f"❌ 401 with header set {i+1}")
-                # فقط continue کن به set بعدی
-                continue
-            else:
-                print(f"⚠️ Status {response.status_code} with header set {i+1}")
+        response = requests.post(
+            endpoint, 
+            headers=headers, 
+            data=data, 
+            timeout=15,
+            verify=False
+        )
         
-        # اگر همه fail شدن
-        print(f"❌ All header sets failed with 401")
-        raise Exception(f"API returned 401 with all header configurations")
+        print(f"🔍 API Response Status: {response.status_code}")
+        print(f"🔍 Response headers: {dict(response.headers)}")
+        
+        if response.status_code == 200:
+            return response.content.hex()
+        elif response.status_code == 401:
+            # شاید مشکل از signature_md5 در JWT باشه
+            print(f"⚠️ 401 Error - Checking JWT payload...")
+            
+            # Decode JWT to see signature
+            parts = jwt_token.split('.')
+            if len(parts) >= 2:
+                import base64
+                payload_part = parts[1]
+                padding = 4 - len(payload_part) % 4
+                if padding != 4:
+                    payload_part += '=' * padding
+                decoded = base64.urlsafe_b64decode(payload_part)
+                payload = json.loads(decoded)
+                print(f"🔍 JWT Payload for debugging: {payload}")
+            
+            raise Exception(f"API returned 401 - JWT might be invalid")
+        else:
+            raise Exception(f"API returned {response.status_code}")
         
     except requests.exceptions.RequestException as e:
         print(f"❌ API request failed: {e}")
@@ -601,18 +593,86 @@ def decode_jwt_token(jwt_token):
     return "N/A"
 
 # ========== API FUNCTIONS ==========
+# تابع get_api_endpoint رو تغییر بده:
 def get_api_endpoint(region):
-    """Get API endpoint based on region"""
-    endpoints = {
-        "IND": "https://client.ind.freefiremobile.com/GetPlayerPersonalShow",
-        "BR": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "US": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "SAC": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "NA": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
-        "ME": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
-        "default": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
-    }
-    return endpoints.get(region.upper(), endpoints["default"])
+    """Get API endpoint - همیشه از SG استفاده کن"""
+    # از JWT payload می‌بینیم که region همیشه SG هست
+    return "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+
+# یا اگر می‌خوای region رو از JWT extract کنی:
+def extract_region_from_jwt(jwt_token):
+    """Extract region from JWT payload"""
+    try:
+        parts = jwt_token.split('.')
+        if len(parts) >= 2:
+            import base64
+            payload_part = parts[1]
+            padding = 4 - len(payload_part) % 4
+            if padding != 4:
+                payload_part += '=' * padding
+            decoded = base64.urlsafe_b64decode(payload_part)
+            payload = json.loads(decoded)
+            return payload.get('noti_region', 'SG')
+    except:
+        pass
+    return 'SG'
+
+# یک endpoint جدید برای تست مستقیم API اضافه کن:
+@app.route('/direct_test', methods=['GET'])
+def direct_test():
+    """Test API directly with a known working JWT"""
+    try:
+        uid = request.args.get('uid', '4285785816')
+        
+        # این JWT رو از لاگ قبلی کپی کن (از payload)
+        test_jwt = "eyJhbGciOiJIUzI1NiIsInN2ciI6IiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoxNDE1MzU4NDkwMSwibmlja25hbWUiOiJTaWRrYVNo4oG44oKy4oKy4oG34oG0Iiwibm90aV9yZWdpb24iOiJTRyIsImxvY2tfcmVnaW9uIjoiIiwiZXh0ZXJuYWxfaWQiOiJhMzQ4ZWM0M2JkZDU5M2MzNTdmNzA2NGJhNGM0YTRmYyIsImV4dGVJuYWxfdHlwZSI6NCwicGxhdF9pZCI6MSwiY2xpZW50X3ZlcnNpb24iOiIxLjExNC4xMyIsImVtdWxhdG9yX3Njb3JlIjoxMDAsImlzX2VtdWxhdG9yIjp0cnVlLCJjb3VudHJ5X2NvZGUiOiJVUyIsImV4dGVybmFsX3VpZCI6NDM0ODIyNDY4MiwicmVnX2F2YXRhciI6MTAyMDAwMDA3LCJzb3VyY2UiOjAsImxvY2tfcmVnaW9uX3RpbWUiOjAsImNsaWVudF90eXBlIjoyLCJzaWduYXR1cmVfbWQ1IjoiNzQyOGIyNTNkZWZjMTY0MDE4YzYwNGExZWJiZmViZGYiLCJ1c2luZ192ZXJzaW9uIjoxLCJyZWxlYXNlX2NoYW5uZWwiOiJhbmRyb2lkIiwicmVsZWFzZV92ZXJzaW9uIjoiT0I1MSIsImV4cCI6MTc2NjEyNTE0NX0"
+        
+        # Create protobuf
+        message = uid_generator_pb2.uid_generator()
+        message.saturn_ = int(uid)
+        message.garena = 1
+        protobuf_data = message.SerializeToString()
+        hex_data = binascii.hexlify(protobuf_data).decode()
+        encrypted_hex = encrypt_aes(hex_data)
+        
+        # Call API با JWT تست
+        endpoint = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+        headers = {
+            'User-Agent': 'UnityPlayer/2018.4.11f1',
+            'Authorization': f'Bearer {test_jwt}',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+        
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            data=bytes.fromhex(encrypted_hex),
+            timeout=15,
+            verify=False
+        )
+        
+        print(f"🔍 Direct Test Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            # Parse response
+            message = AccountPersonalShowInfo()
+            message.ParseFromString(response.content)
+            result = MessageToDict(message)
+            
+            return jsonify({
+                "success": True,
+                "status": response.status_code,
+                "data": result
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "status": response.status_code,
+                "error": response.text[:200]
+            }), 500
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def encrypt_aes(hex_data):
     """Encrypt data with AES"""
