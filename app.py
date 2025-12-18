@@ -277,14 +277,15 @@ def major_login(uid, password, access_token, open_id, region):
             jwt_start = response.text.find("eyJ")
             if jwt_start != -1:
                 jwt_token = response.text[jwt_start:]
-                second_dot = jwt_token.find(".", jwt_token.find(".") + 1)
-                if second_dot != -1:
-                    jwt_token = jwt_token[:second_dot + 44]
-                    
-                    # Decode account_id from JWT
-                    account_id = decode_jwt_token(jwt_token)
-                    print(f"[4/6] JWT Token obtained: {account_id}")
-                    return {"jwt_token": jwt_token, "account_id": account_id}
+                
+                # 🔴 این خط رو حذف کن (توکن رو نبر):
+                # second_dot = jwt_token.find(".", jwt_token.find(".") + 1)
+                # if second_dot != -1:
+                #     jwt_token = jwt_token[:second_dot + 44]
+                
+                account_id = decode_jwt_token(jwt_token)
+                print(f"[4/5] JWT Token obtained (length: {len(jwt_token)})")
+                return {"jwt_token": jwt_token, "account_id": account_id}
         
         return {"jwt_token": "", "account_id": "N/A"}
     except Exception as e:
