@@ -30,12 +30,12 @@ REGION_LANG = {"ME": "ar", "IND": "hi", "ID": "id", "VN": "vi", "TH": "th",
 ACCOUNT_NAME_PREFIX = "SidkaShop"
 PASSWORD_PREFIX = "SidkaShop"
 GARENA_ENCODED = "U0lES0FTSE9Q"
-TOKEN_STORE = {}  # Store tokens in memory
+# ===================================
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ========== FUNCTIONS FROM jwt.py ==========
+# ========== ACCOUNT CREATION FUNCTIONS (WITH RETRY) ==========
 
 def generate_random_name(base_name):
     """Generate name with exponent numbers"""
@@ -118,34 +118,43 @@ def to_unicode_escaped(s):
     """Convert to unicode escaped"""
     return ''.join(c if 32 <= ord(c) <= 126 else f'\\u{ord(c):04x}' for c in s)
 
-def create_acc(region):
+def create_acc(region, max_retries=3):
     """Step 1: Create guest account"""
-    try:
-        password = generate_custom_password(PASSWORD_PREFIX)
-        data = f"password={password}&client_type=2&source=2&app_id=100067"
-        message = data.encode('utf-8')
-        signature = hmac.new(GARENA_KEY, message, hashlib.sha256).hexdigest()
+    for attempt in range(max_retries):
+        try:
+            password = generate_custom_password(PASSWORD_PREFIX)
+            data = f"password={password}&client_type=2&source=2&app_id=100067"
+            message = data.encode('utf-8')
+            signature = hmac.new(GARENA_KEY, message, hashlib.sha256).hexdigest()
+            
+            url = "https://100067.connect.garena.com/oauth/guest/register"
+            headers = {
+                "User-Agent": "GarenaMSDK/4.0.19P8(ASUS_Z01QD ;Android 12;en;US;)",
+                "Authorization": "Signature " + signature,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept-Encoding": "gzip",
+                "Connection": "Keep-Alive"
+            }
+            
+            response = requests.post(url, headers=headers, data=data, timeout=30, verify=False)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if 'uid' in result:
+                    uid = result['uid']
+                    print(f"[1/5] Guest account created: {uid}")
+                    return {"uid": uid, "password": password}
+            else:
+                print(f"[ATTEMPT {attempt + 1}/{max_retries}] Create account failed: {response.status_code}")
+                
+        except Exception as e:
+            print(f"[ATTEMPT {attempt + 1}/{max_retries}] Create account error: {e}")
         
-        url = "https://100067.connect.garena.com/oauth/guest/register"
-        headers = {
-            "User-Agent": "GarenaMSDK/4.0.19P8(ASUS_Z01QD ;Android 12;en;US;)",
-            "Authorization": "Signature " + signature,
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept-Encoding": "gzip",
-            "Connection": "Keep-Alive"
-        }
-        
-        response = requests.post(url, headers=headers, data=data, timeout=30, verify=False)
-        response.raise_for_status()
-        
-        if 'uid' in response.json():
-            uid = response.json()['uid']
-            print(f"[1/6] Guest account created: {uid}")
-            return {"uid": uid, "password": password}
-        return None
-    except Exception as e:
-        print(f"[ERROR] Create account failed: {e}")
-        return None
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
+    
+    print(f"[ERROR] Failed to create account after {max_retries} attempts")
+    return None
 
 def token_grant(uid, password):
     """Step 2: Get access token"""
@@ -173,7 +182,7 @@ def token_grant(uid, password):
         if 'open_id' in response.json():
             open_id = response.json()['open_id']
             access_token = response.json()["access_token"]
-            print(f"[2/6] Token granted for: {uid}")
+            print(f"[2/5] Token granted for: {uid}")
             return {"access_token": access_token, "open_id": open_id}
         return None
     except Exception as e:
@@ -219,12 +228,12 @@ def major_register(access_token, open_id, region):
         }
 
         payload_bytes = CrEaTe_ProTo(payload)
-        encrypted_payload = encrypt_api(payload_bytes.hex())
+        encrypted_payload = binascii.hexlify(payload_bytes).decode()
         
-        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypted_payload), verify=False, timeout=30)
+        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypt_api(encrypted_payload)), verify=False, timeout=30)
         
         if response.status_code == 200:
-            print(f"[3/6] MajorRegister successful: {name}")
+            print(f"[3/5] MajorRegister successful: {name}")
             return {"name": name}
         else:
             print(f"[WARNING] MajorRegister status: {response.status_code}")
@@ -274,69 +283,20 @@ def major_login(uid, password, access_token, open_id, region):
         response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
         
         if response.status_code == 200 and len(response.text) > 10:
-            print(f"[DEBUG] Raw response length: {len(response.text)}")
-            print(f"[DEBUG] Response preview: {response.text[:100]}...")
-            
-            # روش ۱: پیدا کردن JWT واقعی (باید ۳ نقطه داشته باشه)
-            jwt_token = extract_jwt_from_response(response.text)
-            
-            if jwt_token:
-                print(f"[4/5] JWT Token extracted (length: {len(jwt_token)})")
-                account_id = decode_jwt_token(jwt_token)
-                return {"jwt_token": jwt_token, "account_id": account_id}
-            else:
-                print(f"[ERROR] No valid JWT found in response")
-                print(f"[DEBUG] First 200 chars: {response.text[:200]}")
+            jwt_start = response.text.find("eyJ")
+            if jwt_start != -1:
+                jwt_token = response.text[jwt_start:]
+                second_dot = jwt_token.find(".", jwt_token.find(".") + 1)
+                if second_dot != -1:
+                    jwt_token = jwt_token[:second_dot + 44]
+                    account_id = decode_jwt_token(jwt_token)
+                    print(f"[4/5] JWT Token obtained")
+                    return {"jwt_token": jwt_token, "account_id": account_id}
         
         return {"jwt_token": "", "account_id": "N/A"}
     except Exception as e:
         print(f"[ERROR] MajorLogin failed: {e}")
         return {"jwt_token": "", "account_id": "N/A"}
-
-def extract_jwt_from_response(response_text):
-    """Extract clean JWT token from messy response"""
-    import re
-    
-    # روش ۱: پیدا کردن الگوی JWT استاندارد
-    # JWT باید: eyJ... . eyJ... . ...
-    jwt_pattern = r'(eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*)'
-    matches = re.findall(jwt_pattern, response_text)
-    
-    if matches:
-        # طولانی‌ترین match رو بردار (احتمالاً JWT اصلی)
-        longest_match = max(matches, key=len)
-        print(f"[DEBUG] Found JWT pattern, length: {len(longest_match)}")
-        return longest_match
-    
-    # روش ۲: اگر الگو کار نکرد، تا اولین کاراکتر غیرمجاز بردار
-    valid_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=."
-    clean_token = ""
-    
-    for char in response_text:
-        if char in valid_chars:
-            clean_token += char
-        elif clean_token and clean_token.startswith("eyJ"):
-            # اگر قبلاً JWT شروع شده و حالا به کاراکتر نامعتبر رسیدیم
-            break
-    
-    if clean_token.startswith("eyJ") and clean_token.count('.') >= 2:
-        print(f"[DEBUG] Cleaned JWT, length: {len(clean_token)}")
-        return clean_token
-    
-    # روش ۳: جستجوی دستی
-    if "eyJ" in response_text:
-        start = response_text.find("eyJ")
-        # تا 1000 کاراکتر بعد رو بردار (JWT معمولاً کمتر از اینه)
-        potential_token = response_text[start:start + 1000]
-        
-        # فقط کاراکترهای معتبر رو نگه دار
-        cleaned = ''.join(c for c in potential_token if c in valid_chars)
-        if cleaned.count('.') >= 2:
-            print(f"[DEBUG] Manually cleaned JWT, length: {len(cleaned)}")
-            return cleaned
-    
-    print(f"[ERROR] Could not extract JWT from response")
-    return None
 
 def decode_jwt_token(jwt_token):
     """Decode account_id from JWT token"""
@@ -356,93 +316,44 @@ def decode_jwt_token(jwt_token):
         print(f"[WARNING] JWT decode failed: {e}")
     return "N/A"
 
-# ========== THE MISSING STEP 5 ==========
-def force_region_binding(region, jwt_token):
-    """Step 5: Force region binding - THIS IS WHAT YOU'RE MISSING!"""
+def create_fresh_account(region):
+    """Create a fresh account and get JWT token"""
+    print(f"\n{'='*50}")
+    print(f"CREATING FRESH ACCOUNT FOR REGION: {region}")
+    print(f"{'='*50}")
+    
     try:
-        if region.upper() in ["ME", "TH"]:
-            url = "https://loginbp.common.ggbluefox.com/ChooseRegion"
-        else:
-            url = "https://loginbp.ggblueshark.com/ChooseRegion"
+        # Step 1: Create guest account
+        guest_data = create_acc(region)
+        if not guest_data:
+            raise Exception("Failed to create guest account")
         
-        if region.upper() == "CIS":
-            region_code = "RU"
+        # Step 2: Get access token
+        token_data = token_grant(guest_data['uid'], guest_data['password'])
+        if not token_data:
+            raise Exception("Failed to get access token")
+        
+        # Step 3: MajorRegister
+        register_data = major_register(token_data['access_token'], token_data['open_id'], region)
+        if not register_data:
+            print("[WARNING] MajorRegister failed, continuing...")
+        
+        # Step 4: MajorLogin for JWT
+        login_data = major_login(guest_data['uid'], guest_data['password'], 
+                               token_data['access_token'], token_data['open_id'], region)
+        
+        if login_data and login_data['jwt_token']:
+            print(f"[SUCCESS] Fresh JWT token created for {region}")
+            return login_data['jwt_token']
         else:
-            region_code = region.upper()
+            raise Exception("Failed to get JWT token")
             
-        fields = {1: region_code}
-        proto_data = CrEaTe_ProTo(fields)
-        encrypted_data = encrypt_api(proto_data.hex())
-        payload = bytes.fromhex(encrypted_data)
-        
-        headers = {
-            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 12; M2101K7AG Build/SKQ1.210908.001)",
-            'Connection': "Keep-Alive",
-            'Accept-Encoding': "gzip",
-            'Content-Type': "application/x-www-form-urlencoded",
-            'Expect': "100-continue",
-            'Authorization': f"Bearer {jwt_token}",
-            'X-Unity-Version': "2018.4.11f1",
-            'X-GA': "v1 1",
-            'ReleaseVersion': "OB51"
-        }
-        
-        response = requests.post(url, data=payload, headers=headers, verify=False, timeout=30)
-        if response.status_code == 200:
-            print(f"[5/6] Region {region} bound successfully!")
-            return True
-        return False
     except Exception as e:
-        print(f"[WARNING] Region binding failed: {e}")
-        return False
+        print(f"[ERROR] Failed to create fresh account: {e}")
+        return None
 
-def create_complete_account(region):
-    """Create one complete account with ALL 6 STEPS (like jwt.py)"""
-    print(f"\n{'='*60}")
-    print(f"CREATING COMPLETE ACCOUNT FOR: {region}")
-    print(f"{'='*60}")
-    
-    # Step 1: Create guest account
-    guest_data = create_acc(region)
-    if not guest_data:
-        print("[ERROR] Failed at step 1")
-        return None
-    time.sleep(1)
-    
-    # Step 2: Get access token
-    token_data = token_grant(guest_data['uid'], guest_data['password'])
-    if not token_data:
-        print("[ERROR] Failed at step 2")
-        return None
-    time.sleep(1)
-    
-    # Step 3: MajorRegister
-    register_data = major_register(token_data['access_token'], token_data['open_id'], region)
-    if not register_data:
-        print("[ERROR] Failed at step 3")
-        return None
-    time.sleep(2)
-    
-    # Step 4: MajorLogin for JWT
-    login_data = major_login(guest_data['uid'], guest_data['password'], 
-                           token_data['access_token'], token_data['open_id'], region)
-    if not login_data or not login_data['jwt_token']:
-        print("[ERROR] Failed at step 4")
-        return None
-    time.sleep(1)
-    
-    # Step 5: Force region binding - THIS IS CRITICAL!
-    if region.upper() != "BR":
-        force_region_binding(region, login_data['jwt_token'])
-    
-    print(f"[6/6] Account COMPLETED!")
-    print(f"      UID: {guest_data['uid']}")
-    print(f"      Name: {register_data['name']}")
-    print(f"      Account ID: {login_data['account_id']}")
-    
-    return login_data['jwt_token']
+# ========== API FUNCTIONS ==========
 
-# ========== REST OF THE CODE ==========
 def get_api_endpoint(region):
     """Get API endpoint based on region"""
     endpoints = {
@@ -463,34 +374,37 @@ def encrypt_aes(hex_data):
     encrypted_data = cipher.encrypt(padded_data)
     return binascii.hexlify(encrypted_data).decode()
 
-# ========== TOKEN MANAGEMENT ==========
-def get_or_create_token(region):
-    """Get existing token or create new complete account"""
-    region = region.upper()
+def call_api_with_fresh_token(idd, region):
+    """Call API with a fresh JWT token"""
+    # Create fresh account and get token
+    token = create_fresh_account(region)
+    if not token:
+        raise Exception(f"Failed to create fresh account for region {region}")
     
-    # Check if we have a valid token
-    if region in TOKEN_STORE:
-        token_data = TOKEN_STORE[region]
-        if time.time() - token_data["created_at"] < 300:  # 5 minutes
-            print(f"✅ Using existing token for {region}")
-            return token_data["token"]
+    endpoint = get_api_endpoint(region)
     
-    # Create COMPLETE account (6 steps)
-    print(f"🔄 Creating COMPLETE account for {region}")
-    token = create_complete_account(region)
+    headers = {
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+        'Connection': 'Keep-Alive',
+        'Expect': '100-continue',
+        'Authorization': f'Bearer {token}',
+        'X-Unity-Version': '2018.4.11f1',
+        'X-GA': 'v1 1',
+        'ReleaseVersion': 'OB49',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }
     
-    if token:
-        TOKEN_STORE[region] = {
-            "token": token,
-            "created_at": time.time(),
-            "region": region
-        }
-        print(f"✅ Complete token created and stored for {region}")
-        return token
-    
-    return None
+    try:
+        data = bytes.fromhex(idd)
+        response = requests.post(endpoint, headers=headers, data=data, timeout=30)
+        response.raise_for_status()
+        return response.content.hex()
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+        raise
 
 # ========== FLASK ROUTES ==========
+
 @app.route('/accinfo', methods=['GET'])
 def get_player_info():
     try:
@@ -500,24 +414,36 @@ def get_player_info():
         if not uid:
             return jsonify({"error": "UID parameter is required"}), 400
         
-        print(f"\n🎮 REQUEST - UID: {uid}, Region: {region}")
+        # **حذف کش احتمالی**
+        import flask
+        flask.g.pop('cached_token', None)  # اگر تو g ذخیره شده
         
-        # Step 1: Get or create COMPLETE token
-        token = get_or_create_token(region)
-        if not token:
-            return jsonify({"error": "Failed to create complete account"}), 500
+        # **اضافه کردن پارامتر unique برای جلوگیری از کش**
+        import time
+        import random
+        nonce = str(int(time.time())) + str(random.randint(1000, 9999))
         
-        # Step 2: Create protobuf message
+        print(f"\n🆕 NEW REQUEST - UID: {uid}, Region: {region}, Nonce: {nonce}")
+        print("🔄 Forcing fresh account creation...")
+        
+        # Create protobuf message
         message = uid_generator_pb2.uid_generator()
         message.saturn_ = int(uid)
         message.garena = 1
         protobuf_data = message.SerializeToString()
         hex_data = binascii.hexlify(protobuf_data).decode()
         
-        # Step 3: Encrypt the data
+        # Encrypt the data
         encrypted_hex = encrypt_aes(hex_data)
         
-        # Step 4: Call API with COMPLETE token
+        # **همیشه اکانت جدید بساز**
+        print(f"🔐 Creating fresh account for {region}...")
+        token = create_fresh_account(region)
+        
+        if not token:
+            return jsonify({"error": "Failed to create fresh account"}), 500
+            
+        # حالا با توکن جدید API رو صدا بزن
         endpoint = get_api_endpoint(region)
         headers = {
             'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
@@ -528,65 +454,87 @@ def get_player_info():
             'X-GA': 'v1 1',
             'ReleaseVersion': 'OB49',
             'Content-Type': 'application/x-www-form-urlencoded',
-            'Accept-Encoding': 'gzip',
-            'Host': 'clientbp.ggblueshark.com',
         }
         
-        print(f"📡 Calling API with COMPLETE token...")
+        print(f"📡 Calling API endpoint: {endpoint}")
         response = requests.post(endpoint, headers=headers, 
-                               data=bytes.fromhex(encrypted_hex), timeout=30, verify=False)
-        
-        print(f"📊 Response: {response.status_code}, Size: {len(response.content)}")
-        
-        if response.status_code == 401:
-            print(f"🔐 Token still invalid (401), deleting and retrying...")
-            del TOKEN_STORE[region]
-            return jsonify({
-                "error": "Token invalid even after complete setup",
-                "note": "The 6-step process from jwt.py should work"
-            }), 401
+                               data=bytes.fromhex(encrypted_hex), timeout=30)
         
         if response.status_code != 200:
-            return jsonify({
-                "error": f"API failed: {response.status_code}",
-                "response_preview": response.text[:200] if response.text else "Empty"
-            }), response.status_code
+            return jsonify({"error": f"API failed: {response.status_code}"}), 500
+            
+        api_response = response.content.hex()
         
         # Parse response
-        api_response = response.content.hex()
         message = AccountPersonalShowInfo()
         message.ParseFromString(bytes.fromhex(api_response))
         
         # Convert to JSON
         result = MessageToDict(message)
         result['Powered By'] = ['Sidka Shop']
-        result['token_type'] = 'Complete 6-step account'
+        result['note'] = 'Fresh account created for this request'
+        result['request_id'] = nonce
         
         return jsonify(result)
         
+    except ValueError:
+        return jsonify({"error": "Invalid UID format"}), 400
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failure: {str(e)}"}), 500
 
-@app.route('/token_status', methods=['GET'])
-def token_status():
-    """Show token status"""
-    status = {}
-    for region, data in TOKEN_STORE.items():
-        age = int(time.time() - data["created_at"])
-        status[region] = {
-            "age": f"{age}s ({age//60}m)",
-            "valid": age < 300,
-            "token_preview": data["token"][:50] + "..."
-        }
-    return jsonify(status)
+@app.route('/test', methods=['GET'])
+def test_account_creation():
+    """Test endpoint to create account without API call"""
+    region = request.args.get('region', 'ME').upper()
+    
+    try:
+        token = create_fresh_account(region)
+        if token:
+            return jsonify({
+                "success": True,
+                "region": region,
+                "message": "Fresh account created successfully",
+                "token_preview": token[:50] + "..."
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "region": region,
+                "message": "Failed to create account"
+            }), 500
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
-# ========== MAIN ==========
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        "status": "healthy",
+        "service": "FreeFire API",
+        "mode": "Fresh account per request",
+        "timestamp": datetime.now().isoformat()
+    })
+
+# ========== MAIN EXECUTION ==========
+
 if __name__ == "__main__":
     print("=" * 70)
-    print("🎮 FREEFIRE API - COMPLETE 6-STEP ACCOUNTS (jwt.py style)")
-    print("📝 Using region binding for valid tokens")
+    print("🎮 FREEFIRE API - FRESH ACCOUNT PER REQUEST")
+    print("📝 No token storage, fresh JWT for every request")
     print("=" * 70)
     
     port = int(os.environ.get('PORT', 5552))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    
+    print(f"\n🚀 Starting server on http://0.0.0.0:{port}")
+    print("\n📋 Available endpoints:")
+    print("  GET /accinfo?uid=123456789&region=ME  - Get player info (creates fresh account)")
+    print("  GET /test?region=ME                   - Test account creation")
+    print("  GET /health                           - Health check")
+    print("\n" + "=" * 70)
+    
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
