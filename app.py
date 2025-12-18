@@ -277,10 +277,20 @@ def major_login(uid, password, access_token, open_id, region):
         data = data.replace(b'afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390', access_token.encode())
         data = data.replace(b'1d8ec0240ede109973f3321b9354b44d', open_id.encode())
         
+        print(f"🔍 DEBUG: access_token = {access_token[:30]}...")
+        print(f"🔍 DEBUG: open_id = {open_id}")
+        print(f"🔍 DEBUG: Region = {region}")
+        print(f"🔍 DEBUG: URL = {url}")
+        
         d = encrypt_api(data.hex())
         final_payload = bytes.fromhex(d)
 
+        print(f"🔍 DEBUG: Sending request to {url}")
         response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
+        
+        print(f"🔍 DEBUG: Response Status Code = {response.status_code}")
+        print(f"🔍 DEBUG: Response Headers = {dict(response.headers)}")
+        print(f"🔍 DEBUG: Response Preview = {response.text[:200]}")
         
         if response.status_code == 200 and len(response.text) > 10:
             jwt_start = response.text.find("eyJ")
@@ -290,12 +300,18 @@ def major_login(uid, password, access_token, open_id, region):
                 if second_dot != -1:
                     jwt_token = jwt_token[:second_dot + 44]
                     account_id = decode_jwt_token(jwt_token)
-                    print(f"[4/5] JWT Token obtained")
+                    print(f"[4/5] JWT Token obtained: {jwt_token[:50]}...")
                     return {"jwt_token": jwt_token, "account_id": account_id}
+            else:
+                print(f"❌ No JWT token found in response")
+        else:
+            print(f"❌ MajorLogin failed with status {response.status_code}")
         
         return {"jwt_token": "", "account_id": "N/A"}
     except Exception as e:
-        print(f"[ERROR] MajorLogin failed: {e}")
+        print(f"❌ MajorLogin failed with exception: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {"jwt_token": "", "account_id": "N/A"}
 
 def decode_jwt_token(jwt_token):
@@ -443,18 +459,34 @@ class TokenManager:
             return None
     
     def _create_fresh_token(self, region):
-        """Create a fresh token (same as before but simplified)"""
+    """Create a fresh token (same as before but simplified)"""
         try:
+            print(f"🔄 Step 1: Creating guest account for {region}")
             # Step 1: Create guest account
             guest_data = create_acc(region)
             if not guest_data:
+                print("❌ Failed to create guest account")
                 return None
-            
+        
+            print(f"🔄 Step 2: Getting access token")
             # Step 2: Get access token
             token_data = token_grant(guest_data['uid'], guest_data['password'])
             if not token_data:
+                print("❌ Failed to get access token")
                 return None
-            
+        
+            print(f"🔄 Step 3: MajorRegister (optional)")
+            # Step 3: MajorRegister (optional)
+            try:
+                major_register(
+                    token_data['access_token'], 
+                    token_data['open_id'], 
+                    region
+                )
+            except Exception as e:
+                print(f"⚠️ MajorRegister failed but continuing: {e}")
+        
+            print(f"🔄 Step 4: MajorLogin for JWT")
             # Step 4: MajorLogin for JWT
             login_data = major_login(
                 guest_data['uid'], 
@@ -463,14 +495,18 @@ class TokenManager:
                 token_data['open_id'], 
                 region
             )
-            
+        
             if login_data and login_data['jwt_token']:
-                print(f"🎯 Fresh token created for {region}")
+                print(f"✅ Token created successfully for {region}")
                 return login_data['jwt_token']
-            
-            return None
+            else:
+                print(f"❌ Failed to get JWT token")
+                return None
+        
         except Exception as e:
             print(f"❌ Token creation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 # ایجاد global instance
