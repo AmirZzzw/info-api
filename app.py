@@ -274,23 +274,69 @@ def major_login(uid, password, access_token, open_id, region):
         response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
         
         if response.status_code == 200 and len(response.text) > 10:
-            jwt_start = response.text.find("eyJ")
-            if jwt_start != -1:
-                jwt_token = response.text[jwt_start:]
-                
-                # 🔴 این خط رو حذف کن (توکن رو نبر):
-                # second_dot = jwt_token.find(".", jwt_token.find(".") + 1)
-                # if second_dot != -1:
-                #     jwt_token = jwt_token[:second_dot + 44]
-                
+            print(f"[DEBUG] Raw response length: {len(response.text)}")
+            print(f"[DEBUG] Response preview: {response.text[:100]}...")
+            
+            # روش ۱: پیدا کردن JWT واقعی (باید ۳ نقطه داشته باشه)
+            jwt_token = extract_jwt_from_response(response.text)
+            
+            if jwt_token:
+                print(f"[4/5] JWT Token extracted (length: {len(jwt_token)})")
                 account_id = decode_jwt_token(jwt_token)
-                print(f"[4/5] JWT Token obtained (length: {len(jwt_token)})")
                 return {"jwt_token": jwt_token, "account_id": account_id}
+            else:
+                print(f"[ERROR] No valid JWT found in response")
+                print(f"[DEBUG] First 200 chars: {response.text[:200]}")
         
         return {"jwt_token": "", "account_id": "N/A"}
     except Exception as e:
         print(f"[ERROR] MajorLogin failed: {e}")
         return {"jwt_token": "", "account_id": "N/A"}
+
+def extract_jwt_from_response(response_text):
+    """Extract clean JWT token from messy response"""
+    import re
+    
+    # روش ۱: پیدا کردن الگوی JWT استاندارد
+    # JWT باید: eyJ... . eyJ... . ...
+    jwt_pattern = r'(eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*)'
+    matches = re.findall(jwt_pattern, response_text)
+    
+    if matches:
+        # طولانی‌ترین match رو بردار (احتمالاً JWT اصلی)
+        longest_match = max(matches, key=len)
+        print(f"[DEBUG] Found JWT pattern, length: {len(longest_match)}")
+        return longest_match
+    
+    # روش ۲: اگر الگو کار نکرد، تا اولین کاراکتر غیرمجاز بردار
+    valid_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=."
+    clean_token = ""
+    
+    for char in response_text:
+        if char in valid_chars:
+            clean_token += char
+        elif clean_token and clean_token.startswith("eyJ"):
+            # اگر قبلاً JWT شروع شده و حالا به کاراکتر نامعتبر رسیدیم
+            break
+    
+    if clean_token.startswith("eyJ") and clean_token.count('.') >= 2:
+        print(f"[DEBUG] Cleaned JWT, length: {len(clean_token)}")
+        return clean_token
+    
+    # روش ۳: جستجوی دستی
+    if "eyJ" in response_text:
+        start = response_text.find("eyJ")
+        # تا 1000 کاراکتر بعد رو بردار (JWT معمولاً کمتر از اینه)
+        potential_token = response_text[start:start + 1000]
+        
+        # فقط کاراکترهای معتبر رو نگه دار
+        cleaned = ''.join(c for c in potential_token if c in valid_chars)
+        if cleaned.count('.') >= 2:
+            print(f"[DEBUG] Manually cleaned JWT, length: {len(cleaned)}")
+            return cleaned
+    
+    print(f"[ERROR] Could not extract JWT from response")
+    return None
 
 def decode_jwt_token(jwt_token):
     """Decode account_id from JWT token"""
