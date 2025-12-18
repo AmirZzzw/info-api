@@ -6,4 +6,3 @@ pyjwt
 urllib3
 pycryptodome
 httpx
-os
