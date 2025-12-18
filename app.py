@@ -16,6 +16,7 @@ import string
 import random
 import codecs
 import urllib3
+import threading
 import os
 
 app = Flask(__name__)
@@ -35,8 +36,68 @@ GARENA_ENCODED = "U0lES0FTSE9Q"
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ========== ACCOUNT CREATION FUNCTIONS (WITH RETRY) ==========
+# ========== TOKEN MANAGER ==========
+class TokenManager:
+    def __init__(self):
+        self.tokens = {}  # {region: {"token": "...", "expiry": timestamp}}
+        self.lock = threading.Lock()
+    
+    def get_token(self, region):
+        """Get token for region, create if expired"""
+        with self.lock:
+            region = region.upper()
+            now = time.time()
+            
+            # Check if we have a valid token
+            if region in self.tokens:
+                token_data = self.tokens[region]
+                # Check if token is still valid (15 minutes)
+                if token_data["expiry"] > now:
+                    print(f"🔑 Using cached token for {region}")
+                    return token_data["token"]
+            
+            # Create new token
+            print(f"🔄 No valid token for {region}, creating fresh...")
+            token = self._create_fresh_token_simple(region)
+            if token:
+                # Store for 15 minutes
+                self.tokens[region] = {
+                    "token": token,
+                    "expiry": now + 900  # 15 minutes
+                }
+                print(f"✅ Token stored for {region}")
+                return token
+            return None
+    
+    def _create_fresh_token_simple(self, region):
+        """Create a fresh token (SIMPLIFIED VERSION)"""
+        try:
+            print(f"🔄 Creating simple token for {region}")
+            
+            # فقط guest account بساز
+            guest_data = create_acc(region)
+            if not guest_data:
+                print("❌ Failed to create guest account")
+                return None
+            
+            # فقط token grant بگیر
+            token_data = token_grant(guest_data['uid'], guest_data['password'])
+            if not token_data:
+                print("❌ Failed to get access token")
+                return None
+            
+            print(f"✅ Simple token created for {region}")
+            # از access_token به عنوان JWT استفاده کن
+            return token_data['access_token']
+            
+        except Exception as e:
+            print(f"❌ Simple token creation failed: {e}")
+            return None
 
+# ایجاد global instance
+token_manager = TokenManager()
+
+# ========== ACCOUNT FUNCTIONS ==========
 def generate_random_name(base_name):
     """Generate name with exponent numbers"""
     exponent_digits = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', 
@@ -142,7 +203,7 @@ def create_acc(region, max_retries=3):
                 result = response.json()
                 if 'uid' in result:
                     uid = result['uid']
-                    print(f"[1/5] Guest account created: {uid}")
+                    print(f"[1/3] Guest account created: {uid}")
                     return {"uid": uid, "password": password}
             else:
                 print(f"[ATTEMPT {attempt + 1}/{max_retries}] Create account failed: {response.status_code}")
@@ -182,137 +243,12 @@ def token_grant(uid, password):
         if 'open_id' in response.json():
             open_id = response.json()['open_id']
             access_token = response.json()["access_token"]
-            print(f"[2/5] Token granted for: {uid}")
+            print(f"[2/3] Token granted for: {uid}")
             return {"access_token": access_token, "open_id": open_id}
         return None
     except Exception as e:
         print(f"[ERROR] Token grant failed: {e}")
         return None
-
-def major_register(access_token, open_id, region):
-    """Step 3: MajorRegister"""
-    try:
-        if region.upper() in ["ME", "TH"]:
-            url = "https://loginbp.common.ggbluefox.com/MajorRegister"
-        else:
-            url = "https://loginbp.ggblueshark.com/MajorRegister"
-        
-        name = generate_random_name(ACCOUNT_NAME_PREFIX)
-        
-        headers = {
-            "Accept-Encoding": "gzip",
-            "Authorization": "Bearer",   
-            "Connection": "Keep-Alive",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
-            "ReleaseVersion": "OB51",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
-            "X-GA": "v1 1",
-            "X-Unity-Version": "2018.4."
-        }
-
-        lang_code = REGION_LANG.get(region.upper(), "en")
-        payload = {
-            1: name,
-            2: access_token,
-            3: open_id,
-            5: 102000007,
-            6: 4,
-            7: 1,
-            13: 1,
-            14: codecs.decode(to_unicode_escaped(encode_string(open_id)['field_14']), 'unicode_escape').encode('latin1'),
-            15: lang_code,
-            16: 1,
-            17: 1
-        }
-
-        payload_bytes = CrEaTe_ProTo(payload)
-        encrypted_payload = binascii.hexlify(payload_bytes).decode()
-        
-        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypt_api(encrypted_payload)), verify=False, timeout=30)
-        
-        if response.status_code == 200:
-            print(f"[3/5] MajorRegister successful: {name}")
-            return {"name": name}
-        else:
-            print(f"[WARNING] MajorRegister status: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"[ERROR] MajorRegister error: {e}")
-        return None
-
-def major_login(uid, password, access_token, open_id, region):
-    """Step 4: MajorLogin to get JWT Token"""
-    try:
-        lang = REGION_LANG.get(region.upper(), "en")
-        
-        payload_parts = [
-            b'\x1a\x132025-08-30 05:19:21"\tfree fire(\x01:\x081.114.13B2Android OS 9 / API-28 (PI/rel.cjw.20220518.114133)J\x08HandheldR\nATM MobilsZ\x04WIFI`\xb6\nh\xee\x05r\x03300z\x1fARMv7 VFPv3 NEON VMH | 2400 | 2\x80\x01\xc9\x0f\x8a\x01\x0fAdreno (TM) 640\x92\x01\rOpenGL ES 3.2\x9a\x01+Google|dfa4ab4b-9dc4-454e-8065-e70c733fa53f\xa2\x01\x0e105.235.139.91\xaa\x01\x02',
-            lang.encode("ascii"),
-            b'\xb2\x01 1d8ec0240ede109973f3321b9354b44d\xba\x01\x014\xc2\x01\x08Handheld\xca\x01\x10Asus ASUS_I005DA\xea\x01@afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390\xf0\x01\x01\xca\x02\nATM Mobils\xd2\x02\x04WIFI\xca\x03 7428b253defc164018c604a1ebbfebdf\xe0\x03\xa8\x81\x02\xe8\x03\xf6\xe5\x01\xf0\x03\xaf\x13\xf8\x03\x84\x07\x80\x04\xe7\xf0\x01\x88\x04\xa8\x81\x02\x90\x04\xe7\xf0\x01\x98\x04\xa8\x81\x02\xc8\x04\x01\xd2\x04=/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/lib/arm\xe0\x04\x01\xea\x04_2087f61c19f57f2af4e7feff0b24d9d9|/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019118692\xb2\x05\tOpenGLES2\xb8\x05\xff\x7f\xc0\x05\x04\xe0\x05\xf3F\xea\x05\x07android\xf2\x05pKqsHT5ZLWrYljNb5Vqh//yFRlaPHSO9NWSQsVvOmdhEEn7W+VHNUK+Q+fduA3ptNrGB0Ll0LRz3WW0jOwesLj6aiU7sZ40p8BfUE/FI/jzSTwRe2\xf8\x05\xfb\xe4\x06\x88\x06\x01\x90\x06\x01\x9a\x06\x014\xa2\x06\x014\xb2\x06"GQ@O\x00\x0e^\x00D\x06UA\x0ePM\r\x13hZ\x07T\x06\x0cm\\V\x0ejYV;\x0bU5'
-        ]
-        
-        payload = b''.join(payload_parts)
-        
-        if region.upper() in ["ME", "TH"]:
-            url = "https://loginbp.common.ggbluefox.com/MajorLogin"
-        else:
-            url = "https://loginbp.ggblueshark.com/MajorLogin"
-        
-        headers = {
-            "Accept-Encoding": "gzip",
-            "Authorization": "Bearer",
-            "Connection": "Keep-Alive",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
-            "ReleaseVersion": "OB51",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
-            "X-GA": "v1 1",
-            "X-Unity-Version": "2018.4.11f1"
-        }
-
-        data = payload
-        data = data.replace(b'afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390', access_token.encode())
-        data = data.replace(b'1d8ec0240ede109973f3321b9354b44d', open_id.encode())
-        
-        print(f"🔍 DEBUG: access_token = {access_token[:30]}...")
-        print(f"🔍 DEBUG: open_id = {open_id}")
-        print(f"🔍 DEBUG: Region = {region}")
-        print(f"🔍 DEBUG: URL = {url}")
-        
-        d = encrypt_api(data.hex())
-        final_payload = bytes.fromhex(d)
-
-        print(f"🔍 DEBUG: Sending request to {url}")
-        response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
-        
-        print(f"🔍 DEBUG: Response Status Code = {response.status_code}")
-        print(f"🔍 DEBUG: Response Headers = {dict(response.headers)}")
-        print(f"🔍 DEBUG: Response Preview = {response.text[:200]}")
-        
-        if response.status_code == 200 and len(response.text) > 10:
-            jwt_start = response.text.find("eyJ")
-            if jwt_start != -1:
-                jwt_token = response.text[jwt_start:]
-                second_dot = jwt_token.find(".", jwt_token.find(".") + 1)
-                if second_dot != -1:
-                    jwt_token = jwt_token[:second_dot + 44]
-                    account_id = decode_jwt_token(jwt_token)
-                    print(f"[4/5] JWT Token obtained: {jwt_token[:50]}...")
-                    return {"jwt_token": jwt_token, "account_id": account_id}
-            else:
-                print(f"❌ No JWT token found in response")
-        else:
-            print(f"❌ MajorLogin failed with status {response.status_code}")
-        
-        return {"jwt_token": "", "account_id": "N/A"}
-    except Exception as e:
-        print(f"❌ MajorLogin failed with exception: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {"jwt_token": "", "account_id": "N/A"}
 
 def decode_jwt_token(jwt_token):
     """Decode account_id from JWT token"""
@@ -332,44 +268,7 @@ def decode_jwt_token(jwt_token):
         print(f"[WARNING] JWT decode failed: {e}")
     return "N/A"
 
-def create_fresh_account(region):
-    """Create a fresh account and get JWT token"""
-    print(f"\n{'='*50}")
-    print(f"CREATING FRESH ACCOUNT FOR REGION: {region}")
-    print(f"{'='*50}")
-    
-    try:
-        # Step 1: Create guest account
-        guest_data = create_acc(region)
-        if not guest_data:
-            raise Exception("Failed to create guest account")
-        
-        # Step 2: Get access token
-        token_data = token_grant(guest_data['uid'], guest_data['password'])
-        if not token_data:
-            raise Exception("Failed to get access token")
-        
-        # Step 3: MajorRegister
-        register_data = major_register(token_data['access_token'], token_data['open_id'], region)
-        if not register_data:
-            print("[WARNING] MajorRegister failed, continuing...")
-        
-        # Step 4: MajorLogin for JWT
-        login_data = major_login(guest_data['uid'], guest_data['password'], 
-                               token_data['access_token'], token_data['open_id'], region)
-        
-        if login_data and login_data['jwt_token']:
-            print(f"[SUCCESS] Fresh JWT token created for {region}")
-            return login_data['jwt_token']
-        else:
-            raise Exception("Failed to get JWT token")
-            
-    except Exception as e:
-        print(f"[ERROR] Failed to create fresh account: {e}")
-        return None
-
 # ========== API FUNCTIONS ==========
-
 def get_api_endpoint(region):
     """Get API endpoint based on region"""
     endpoints = {
@@ -389,141 +288,6 @@ def encrypt_aes(hex_data):
     padded_data = pad(bytes.fromhex(hex_data), AES.block_size)
     encrypted_data = cipher.encrypt(padded_data)
     return binascii.hexlify(encrypted_data).decode()
-
-def call_api_with_fresh_token(idd, region):
-    """Call API with a fresh JWT token"""
-    # Create fresh account and get token
-    token = create_fresh_account(region)
-    if not token:
-        raise Exception(f"Failed to create fresh account for region {region}")
-    
-    endpoint = get_api_endpoint(region)
-    
-    headers = {
-        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-        'Connection': 'Keep-Alive',
-        'Expect': '100-continue',
-        'Authorization': f'Bearer {token}',
-        'X-Unity-Version': '2018.4.11f1',
-        'X-GA': 'v1 1',
-        'ReleaseVersion': 'OB49',
-        'Content-Type': 'application/x-www-form-urlencoded',
-    }
-    
-    try:
-        data = bytes.fromhex(idd)
-        response = requests.post(endpoint, headers=headers, data=data, timeout=30)
-        response.raise_for_status()
-        return response.content.hex()
-    except requests.exceptions.RequestException as e:
-        print(f"API request failed: {e}")
-        raise
-
-# ========== FLASK ROUTES ==========
-
-# اضافه کردن این خطوط در بالای فایل (بعد از imports)
-import threading
-from datetime import datetime, timedelta
-
-# ========== TOKEN STORAGE ==========
-class TokenManager:
-    def __init__(self):
-        self.tokens = {}  # {region: {"token": "...", "expiry": timestamp}}
-        self.lock = threading.Lock()
-    
-    def get_token(self, region):
-        """Get token for region, create if expired"""
-        with self.lock:
-            region = region.upper()
-            now = time.time()
-            
-            # Check if we have a valid token
-            if region in self.tokens:
-                token_data = self.tokens[region]
-                # Check if token is still valid (15 دقیقه)
-                if token_data["expiry"] > now:
-                    print(f"🔑 Using cached token for {region}")
-                    return token_data["token"]
-            
-            # Create new token
-            print(f"🔄 No valid token for {region}, creating fresh...")
-            token = self._create_fresh_token(region)
-            if token:
-                # Store for 15 minutes
-                self.tokens[region] = {
-                    "token": token,
-                    "expiry": now + 900  # 15 minutes
-                }
-                print(f"✅ Token stored for {region}")
-                return token
-            return None
-    
-    def _create_fresh_token(self, region):
-    """Create a fresh token (same as before but simplified)"""
-        try:
-            print(f"🔄 Step 1: Creating guest account for {region}")
-            # Step 1: Create guest account
-            guest_data = create_acc(region)
-            if not guest_data:
-                print("❌ Failed to create guest account")
-                return None
-        
-            print(f"🔄 Step 2: Getting access token")
-            # Step 2: Get access token
-            token_data = token_grant(guest_data['uid'], guest_data['password'])
-            if not token_data:
-                print("❌ Failed to get access token")
-                return None
-        
-            print(f"🔄 Step 3: MajorRegister (optional)")
-            # Step 3: MajorRegister (optional)
-            try:
-                major_register(
-                    token_data['access_token'], 
-                    token_data['open_id'], 
-                    region
-                )
-            except Exception as e:
-                print(f"⚠️ MajorRegister failed but continuing: {e}")
-        
-            print(f"🔄 Step 4: MajorLogin for JWT")
-            # Step 4: MajorLogin for JWT
-            login_data = major_login(
-                guest_data['uid'], 
-                guest_data['password'], 
-                token_data['access_token'], 
-                token_data['open_id'], 
-                region
-            )
-        
-            if login_data and login_data['jwt_token']:
-                print(f"✅ Token created successfully for {region}")
-                return login_data['jwt_token']
-            else:
-                print(f"❌ Failed to get JWT token")
-                return None
-        
-        except Exception as e:
-            print(f"❌ Token creation failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-# ایجاد global instance
-token_manager = TokenManager()
-
-# ========== MODIFIED FUNCTIONS ==========
-def create_fresh_account_simple(region):
-    """ساده‌شده - فقط توکن می‌سازه"""
-    try:
-        # استفاده از توکن‌منیجر
-        token = token_manager.get_token(region)
-        if token:
-            return token
-        return None
-    except Exception as e:
-        print(f"❌ Failed to get token: {e}")
-        return None
 
 def call_api_with_token(idd, region):
     """Call API with token from manager"""
@@ -575,13 +339,17 @@ def call_api_with_token(idd, region):
                     verify=False
                 )
         
-        response.raise_for_status()
+        if response.status_code != 200:
+            print(f"❌ API Error {response.status_code}: {response.text[:200]}")
+            raise Exception(f"API returned {response.status_code}")
+            
         return response.content.hex()
+        
     except requests.exceptions.RequestException as e:
-        print(f"API request failed: {e}")
+        print(f"❌ API request failed: {e}")
         raise
 
-# ========== MODIFIED ROUTE ==========
+# ========== FLASK ROUTES ==========
 @app.route('/accinfo', methods=['GET'])
 def get_player_info():
     try:
@@ -627,7 +395,6 @@ def get_player_info():
         print(f"❌ Error: {e}")
         return jsonify({"error": f"Failure: {str(e)}"}), 500
 
-# ========== NEW ENDPOINTS ==========
 @app.route('/tokens', methods=['GET'])
 def list_tokens():
     """لیست توکن‌های ذخیره شده"""
@@ -670,23 +437,45 @@ def refresh_token(region):
             "message": "Failed to refresh token"
         }), 500
 
-# تغییر endpoint تست
 @app.route('/test', methods=['GET'])
 def test_endpoint():
     """تست ساده"""
+    region = request.args.get('region', 'ME').upper()
+    
+    try:
+        token = token_manager.get_token(region)
+        if token:
+            return jsonify({
+                "success": True,
+                "region": region,
+                "message": "Token system working",
+                "has_token": True,
+                "token_preview": token[:30] + "..."
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "region": region,
+                "message": "Failed to get token"
+            }), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health():
     return jsonify({
-        "status": "ok",
-        "message": "API is working with token caching",
-        "timestamp": datetime.now().isoformat(),
-        "cached_regions": list(token_manager.tokens.keys())
+        "status": "healthy",
+        "service": "FreeFire API",
+        "mode": "Simple Token Caching",
+        "timestamp": datetime.now().isoformat()
     })
 
 # ========== MAIN ==========
 if __name__ == "__main__":
     print("=" * 70)
-    print("🚀 FREEFIRE API - TOKEN CACHING SYSTEM")
+    print("🚀 FREEFIRE API - SIMPLE TOKEN CACHING")
     print("✅ Tokens cached for 15 minutes")
-    print("✅ Auto-refresh on expiration")
+    print("✅ Only 2-step authentication (guest + token)")
     print("=" * 70)
     
     port = int(os.environ.get('PORT', 5552))
@@ -696,7 +485,7 @@ if __name__ == "__main__":
     print("  GET  /accinfo?uid=...&region=...  - Player info")
     print("  GET  /tokens                      - List cached tokens")
     print("  POST /refresh_token/<region>      - Refresh token")
-    print("  GET  /test                        - Test endpoint")
+    print("  GET  /test?region=ME              - Test token system")
     print("  GET  /health                      - Health check")
     print("\n" + "=" * 70)
     
