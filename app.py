@@ -405,6 +405,147 @@ def call_api_with_fresh_token(idd, region):
 
 # ========== FLASK ROUTES ==========
 
+# اضافه کردن این خطوط در بالای فایل (بعد از imports)
+import threading
+from datetime import datetime, timedelta
+
+# ========== TOKEN STORAGE ==========
+class TokenManager:
+    def __init__(self):
+        self.tokens = {}  # {region: {"token": "...", "expiry": timestamp}}
+        self.lock = threading.Lock()
+    
+    def get_token(self, region):
+        """Get token for region, create if expired"""
+        with self.lock:
+            region = region.upper()
+            now = time.time()
+            
+            # Check if we have a valid token
+            if region in self.tokens:
+                token_data = self.tokens[region]
+                # Check if token is still valid (15 دقیقه)
+                if token_data["expiry"] > now:
+                    print(f"🔑 Using cached token for {region}")
+                    return token_data["token"]
+            
+            # Create new token
+            print(f"🔄 No valid token for {region}, creating fresh...")
+            token = self._create_fresh_token(region)
+            if token:
+                # Store for 15 minutes
+                self.tokens[region] = {
+                    "token": token,
+                    "expiry": now + 900  # 15 minutes
+                }
+                print(f"✅ Token stored for {region}")
+                return token
+            return None
+    
+    def _create_fresh_token(self, region):
+        """Create a fresh token (same as before but simplified)"""
+        try:
+            # Step 1: Create guest account
+            guest_data = create_acc(region)
+            if not guest_data:
+                return None
+            
+            # Step 2: Get access token
+            token_data = token_grant(guest_data['uid'], guest_data['password'])
+            if not token_data:
+                return None
+            
+            # Step 4: MajorLogin for JWT
+            login_data = major_login(
+                guest_data['uid'], 
+                guest_data['password'], 
+                token_data['access_token'], 
+                token_data['open_id'], 
+                region
+            )
+            
+            if login_data and login_data['jwt_token']:
+                print(f"🎯 Fresh token created for {region}")
+                return login_data['jwt_token']
+            
+            return None
+        except Exception as e:
+            print(f"❌ Token creation failed: {e}")
+            return None
+
+# ایجاد global instance
+token_manager = TokenManager()
+
+# ========== MODIFIED FUNCTIONS ==========
+def create_fresh_account_simple(region):
+    """ساده‌شده - فقط توکن می‌سازه"""
+    try:
+        # استفاده از توکن‌منیجر
+        token = token_manager.get_token(region)
+        if token:
+            return token
+        return None
+    except Exception as e:
+        print(f"❌ Failed to get token: {e}")
+        return None
+
+def call_api_with_token(idd, region):
+    """Call API with token from manager"""
+    # Get token (from cache or create new)
+    token = token_manager.get_token(region)
+    if not token:
+        raise Exception(f"Failed to get token for region {region}")
+    
+    endpoint = get_api_endpoint(region)
+    
+    headers = {
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+        'Connection': 'Keep-Alive',
+        'Expect': '100-continue',
+        'Authorization': f'Bearer {token}',
+        'X-Unity-Version': '2018.4.11f1',
+        'X-GA': 'v1 1',
+        'ReleaseVersion': 'OB49',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }
+    
+    try:
+        data = bytes.fromhex(idd)
+        response = requests.post(
+            endpoint, 
+            headers=headers, 
+            data=data, 
+            timeout=15,
+            verify=False  # مهم برای Vercel
+        )
+        
+        # اگر ارور 401 (توکن منقضی)
+        if response.status_code == 401:
+            print(f"⚠️ Token expired for {region}, refreshing...")
+            # پاک کردن توکن قدیمی
+            with token_manager.lock:
+                if region in token_manager.tokens:
+                    del token_manager.tokens[region]
+            
+            # توکن جدید بگیر
+            token = token_manager.get_token(region)
+            if token:
+                headers['Authorization'] = f'Bearer {token}'
+                response = requests.post(
+                    endpoint, 
+                    headers=headers, 
+                    data=data, 
+                    timeout=15,
+                    verify=False
+                )
+        
+        response.raise_for_status()
+        return response.content.hex()
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+        raise
+
+# ========== MODIFIED ROUTE ==========
 @app.route('/accinfo', methods=['GET'])
 def get_player_info():
     try:
@@ -414,17 +555,7 @@ def get_player_info():
         if not uid:
             return jsonify({"error": "UID parameter is required"}), 400
         
-        # **حذف کش احتمالی**
-        import flask
-        flask.g.pop('cached_token', None)  # اگر تو g ذخیره شده
-        
-        # **اضافه کردن پارامتر unique برای جلوگیری از کش**
-        import time
-        import random
-        nonce = str(int(time.time())) + str(random.randint(1000, 9999))
-        
-        print(f"\n🆕 NEW REQUEST - UID: {uid}, Region: {region}, Nonce: {nonce}")
-        print("🔄 Forcing fresh account creation...")
+        print(f"\n🎯 NEW REQUEST - UID: {uid}, Region: {region}")
         
         # Create protobuf message
         message = uid_generator_pb2.uid_generator()
@@ -436,34 +567,12 @@ def get_player_info():
         # Encrypt the data
         encrypted_hex = encrypt_aes(hex_data)
         
-        # **همیشه اکانت جدید بساز**
-        print(f"🔐 Creating fresh account for {region}...")
-        token = create_fresh_account(region)
+        # Call API با سیستم توکن جدید
+        print(f"📡 Calling API for region {region}...")
+        api_response = call_api_with_token(encrypted_hex, region)
         
-        if not token:
-            return jsonify({"error": "Failed to create fresh account"}), 500
-            
-        # حالا با توکن جدید API رو صدا بزن
-        endpoint = get_api_endpoint(region)
-        headers = {
-            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-            'Connection': 'Keep-Alive',
-            'Expect': '100-continue',
-            'Authorization': f'Bearer {token}',
-            'X-Unity-Version': '2018.4.11f1',
-            'X-GA': 'v1 1',
-            'ReleaseVersion': 'OB49',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        }
-        
-        print(f"📡 Calling API endpoint: {endpoint}")
-        response = requests.post(endpoint, headers=headers, 
-                               data=bytes.fromhex(encrypted_hex), timeout=30)
-        
-        if response.status_code != 200:
-            return jsonify({"error": f"API failed: {response.status_code}"}), 500
-            
-        api_response = response.content.hex()
+        if not api_response:
+            return jsonify({"error": "Empty response from API"}), 400
         
         # Parse response
         message = AccountPersonalShowInfo()
@@ -472,8 +581,7 @@ def get_player_info():
         # Convert to JSON
         result = MessageToDict(message)
         result['Powered By'] = ['Sidka Shop']
-        result['note'] = 'Fresh account created for this request'
-        result['request_id'] = nonce
+        result['token_status'] = 'cached_token_used' if region in token_manager.tokens else 'fresh_token_created'
         
         return jsonify(result)
         
@@ -481,60 +589,79 @@ def get_player_info():
         return jsonify({"error": "Invalid UID format"}), 400
     except Exception as e:
         print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": f"Failure: {str(e)}"}), 500
 
-@app.route('/test', methods=['GET'])
-def test_account_creation():
-    """Test endpoint to create account without API call"""
-    region = request.args.get('region', 'ME').upper()
+# ========== NEW ENDPOINTS ==========
+@app.route('/tokens', methods=['GET'])
+def list_tokens():
+    """لیست توکن‌های ذخیره شده"""
+    tokens_info = {}
+    for region, data in token_manager.tokens.items():
+        tokens_info[region] = {
+            "has_token": bool(data["token"]),
+            "expires_in": int(data["expiry"] - time.time()),
+            "token_preview": data["token"][:30] + "..." if data["token"] else None
+        }
     
-    try:
-        token = create_fresh_account(region)
-        if token:
-            return jsonify({
-                "success": True,
-                "region": region,
-                "message": "Fresh account created successfully",
-                "token_preview": token[:50] + "..."
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "region": region,
-                "message": "Failed to create account"
-            }), 500
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-@app.route('/health', methods=['GET'])
-def health():
     return jsonify({
-        "status": "healthy",
-        "service": "FreeFire API",
-        "mode": "Fresh account per request",
-        "timestamp": datetime.now().isoformat()
+        "status": "ok",
+        "tokens": tokens_info,
+        "total_regions": len(tokens_info)
     })
 
-# ========== MAIN EXECUTION ==========
+@app.route('/refresh_token/<region>', methods=['POST'])
+def refresh_token(region):
+    """رفرش کردن توکن یک منطقه"""
+    region = region.upper()
+    
+    with token_manager.lock:
+        if region in token_manager.tokens:
+            del token_manager.tokens[region]
+    
+    token = token_manager.get_token(region)
+    
+    if token:
+        return jsonify({
+            "success": True,
+            "region": region,
+            "message": "Token refreshed successfully",
+            "token_preview": token[:30] + "..."
+        })
+    else:
+        return jsonify({
+            "success": False,
+            "region": region,
+            "message": "Failed to refresh token"
+        }), 500
 
+# تغییر endpoint تست
+@app.route('/test', methods=['GET'])
+def test_endpoint():
+    """تست ساده"""
+    return jsonify({
+        "status": "ok",
+        "message": "API is working with token caching",
+        "timestamp": datetime.now().isoformat(),
+        "cached_regions": list(token_manager.tokens.keys())
+    })
+
+# ========== MAIN ==========
 if __name__ == "__main__":
     print("=" * 70)
-    print("🎮 FREEFIRE API - FRESH ACCOUNT PER REQUEST")
-    print("📝 No token storage, fresh JWT for every request")
+    print("🚀 FREEFIRE API - TOKEN CACHING SYSTEM")
+    print("✅ Tokens cached for 15 minutes")
+    print("✅ Auto-refresh on expiration")
     print("=" * 70)
     
     port = int(os.environ.get('PORT', 5552))
     
-    print(f"\n🚀 Starting server on http://0.0.0.0:{port}")
-    print("\n📋 Available endpoints:")
-    print("  GET /accinfo?uid=123456789&region=ME  - Get player info (creates fresh account)")
-    print("  GET /test?region=ME                   - Test account creation")
-    print("  GET /health                           - Health check")
+    print(f"\n📡 Starting on http://0.0.0.0:{port}")
+    print("\n📋 Endpoints:")
+    print("  GET  /accinfo?uid=...&region=...  - Player info")
+    print("  GET  /tokens                      - List cached tokens")
+    print("  POST /refresh_token/<region>      - Refresh token")
+    print("  GET  /test                        - Test endpoint")
+    print("  GET  /health                      - Health check")
     print("\n" + "=" * 70)
     
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
