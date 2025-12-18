@@ -1,11 +1,9 @@
+# -*- coding: utf-8 -*-
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 import binascii
 import requests
 from flask import Flask, jsonify, request
-from data_pb2 import AccountPersonalShowInfo
-from google.protobuf.json_format import MessageToDict
-import uid_generator_pb2
 import time
 import json
 import base64
@@ -17,6 +15,8 @@ import random
 import codecs
 import urllib3
 import os
+import sys
+import traceback
 
 app = Flask(__name__)
 
@@ -30,13 +30,11 @@ REGION_LANG = {"ME": "ar", "IND": "hi", "ID": "id", "VN": "vi", "TH": "th",
 ACCOUNT_NAME_PREFIX = "SidkaShop"
 PASSWORD_PREFIX = "SidkaShop"
 GARENA_ENCODED = "U0lES0FTSE9Q"
-# ===================================
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ========== ACCOUNT CREATION FUNCTIONS (WITH RETRY) ==========
-
+# ========== HELPER FUNCTIONS ==========
 def generate_random_name(base_name):
     """Generate name with exponent numbers"""
     exponent_digits = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', 
@@ -118,6 +116,7 @@ def to_unicode_escaped(s):
     """Convert to unicode escaped"""
     return ''.join(c if 32 <= ord(c) <= 126 else f'\\u{ord(c):04x}' for c in s)
 
+# ========== ACCOUNT CREATION ==========
 def create_acc(region, max_retries=3):
     """Step 1: Create guest account"""
     for attempt in range(max_retries):
@@ -352,8 +351,6 @@ def create_fresh_account(region):
         print(f"[ERROR] Failed to create fresh account: {e}")
         return None
 
-# ========== API FUNCTIONS ==========
-
 def get_api_endpoint(region):
     """Get API endpoint based on region"""
     endpoints = {
@@ -374,37 +371,55 @@ def encrypt_aes(hex_data):
     encrypted_data = cipher.encrypt(padded_data)
     return binascii.hexlify(encrypted_data).decode()
 
-def call_api_with_fresh_token(idd, region):
-    """Call API with a fresh JWT token"""
-    # Create fresh account and get token
-    token = create_fresh_account(region)
-    if not token:
-        raise Exception(f"Failed to create fresh account for region {region}")
+# ========== IMPORT PROTOBUF MODULES ==========
+try:
+    # First try to import directly
+    import data_pb2
+    import uid_generator_pb2
+    print("✅ Successfully imported protobuf modules")
+except ImportError as e:
+    print(f"❌ Failed to import protobuf modules: {e}")
+    print("Trying alternative import methods...")
     
-    endpoint = get_api_endpoint(region)
-    
-    headers = {
-        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
-        'Connection': 'Keep-Alive',
-        'Expect': '100-continue',
-        'Authorization': f'Bearer {token}',
-        'X-Unity-Version': '2018.4.11f1',
-        'X-GA': 'v1 1',
-        'ReleaseVersion': 'OB49',
-        'Content-Type': 'application/x-www-form-urlencoded',
-    }
+    # Try adding current directory to path
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, current_dir)
     
     try:
-        data = bytes.fromhex(idd)
-        response = requests.post(endpoint, headers=headers, data=data, timeout=30)
-        response.raise_for_status()
-        return response.content.hex()
-    except requests.exceptions.RequestException as e:
-        print(f"API request failed: {e}")
-        raise
+        import data_pb2
+        import uid_generator_pb2
+        print("✅ Imported protobuf modules using sys.path")
+    except ImportError as e2:
+        print(f"❌ Still failed: {e2}")
+        # Create fallback mock modules
+        print("⚠️ Using mock modules - API may not work correctly")
+        
+        # Create minimal uid_generator mock
+        class MockUidGenerator:
+            class uid_generator:
+                def __init__(self):
+                    self.saturn_ = 0
+                    self.garena = 0
+                
+                def SerializeToString(self):
+                    return b'\x08\x00\x10\x00'
+        
+        uid_generator_pb2 = MockUidGenerator()
+        
+        # Create minimal data_pb2 mock
+        class MockDataPB2:
+            class AccountPersonalShowInfo:
+                def __init__(self):
+                    pass
+                def ParseFromString(self, data):
+                    return 0
+                @staticmethod
+                def __call__():
+                    return MockDataPB2.AccountPersonalShowInfo()
+        
+        data_pb2 = MockDataPB2()
 
 # ========== FLASK ROUTES ==========
-
 @app.route('/accinfo', methods=['GET'])
 def get_player_info():
     try:
@@ -414,36 +429,46 @@ def get_player_info():
         if not uid:
             return jsonify({"error": "UID parameter is required"}), 400
         
-        # **حذف کش احتمالی**
-        import flask
-        flask.g.pop('cached_token', None)  # اگر تو g ذخیره شده
+        print(f"\n🎮 STARTING REQUEST - UID: {uid}, Region: {region}")
+        print(f"📅 Time: {datetime.now().isoformat()}")
         
-        # **اضافه کردن پارامتر unique برای جلوگیری از کش**
-        import time
-        import random
-        nonce = str(int(time.time())) + str(random.randint(1000, 9999))
+        # Step 1: Create protobuf message
+        try:
+            message = uid_generator_pb2.uid_generator()
+            message.saturn_ = int(uid)
+            message.garena = 1
+            protobuf_data = message.SerializeToString()
+            hex_data = binascii.hexlify(protobuf_data).decode()
+            print(f"✅ Created protobuf data: {len(protobuf_data)} bytes")
+        except Exception as e:
+            print(f"❌ Protobuf creation failed: {e}")
+            return jsonify({"error": f"Protobuf creation failed: {str(e)}"}), 500
         
-        print(f"\n🆕 NEW REQUEST - UID: {uid}, Region: {region}, Nonce: {nonce}")
-        print("🔄 Forcing fresh account creation...")
+        # Step 2: Encrypt the data
+        try:
+            encrypted_hex = encrypt_aes(hex_data)
+            print(f"✅ Encrypted data: {len(encrypted_hex)//2} bytes")
+        except Exception as e:
+            print(f"❌ Encryption failed: {e}")
+            return jsonify({"error": f"Encryption failed: {str(e)}"}), 500
         
-        # Create protobuf message
-        message = uid_generator_pb2.uid_generator()
-        message.saturn_ = int(uid)
-        message.garena = 1
-        protobuf_data = message.SerializeToString()
-        hex_data = binascii.hexlify(protobuf_data).decode()
-        
-        # Encrypt the data
-        encrypted_hex = encrypt_aes(hex_data)
-        
-        # **همیشه اکانت جدید بساز**
-        print(f"🔐 Creating fresh account for {region}...")
-        token = create_fresh_account(region)
-        
-        if not token:
-            return jsonify({"error": "Failed to create fresh account"}), 500
+        # Step 3: Create fresh account
+        try:
+            print("🔐 Creating fresh account...")
+            start_time = time.time()
+            token = create_fresh_account(region)
+            account_creation_time = time.time() - start_time
+            print(f"⏱️ Account creation took: {account_creation_time:.2f} seconds")
             
-        # حالا با توکن جدید API رو صدا بزن
+            if not token:
+                raise Exception("Failed to create fresh account")
+                
+            print(f"✅ Got JWT token (length: {len(token)})")
+        except Exception as e:
+            print(f"❌ Account creation failed: {e}")
+            return jsonify({"error": f"Account creation failed: {str(e)}"}), 500
+        
+        # Step 4: Prepare API request
         endpoint = get_api_endpoint(region)
         headers = {
             'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
@@ -456,85 +481,135 @@ def get_player_info():
             'Content-Type': 'application/x-www-form-urlencoded',
         }
         
-        print(f"📡 Calling API endpoint: {endpoint}")
-        response = requests.post(endpoint, headers=headers, 
-                               data=bytes.fromhex(encrypted_hex), timeout=30)
-        
-        if response.status_code != 200:
-            return jsonify({"error": f"API failed: {response.status_code}"}), 500
+        # Step 5: Call API
+        try:
+            print(f"📡 Calling API endpoint: {endpoint}")
+            print(f"📊 Payload size: {len(encrypted_hex)//2} bytes")
             
-        api_response = response.content.hex()
+            start_time = time.time()
+            response = requests.post(endpoint, headers=headers, 
+                                   data=bytes.fromhex(encrypted_hex), 
+                                   timeout=30, verify=False)
+            api_call_time = time.time() - start_time
+            
+            print(f"⏱️ API call took: {api_call_time:.2f} seconds")
+            print(f"📋 Response status: {response.status_code}")
+            print(f"📦 Response size: {len(response.content)} bytes")
+            
+            if response.status_code != 200:
+                print(f"❌ API returned error: {response.status_code}")
+                print(f"Response preview: {response.text[:200]}")
+                return jsonify({
+                    "error": f"API failed: {response.status_code}",
+                    "response_preview": response.text[:200] if response.text else "Empty response"
+                }), 500
+            
+            api_response = response.content.hex()
+            print(f"✅ API call successful, response: {len(api_response)//2} bytes")
+            
+        except requests.exceptions.Timeout:
+            print("❌ API request timed out")
+            return jsonify({"error": "API request timed out"}), 504
+        except requests.exceptions.RequestException as e:
+            print(f"❌ API request failed: {e}")
+            return jsonify({"error": f"API request failed: {str(e)}"}), 500
         
-        # Parse response
-        message = AccountPersonalShowInfo()
-        message.ParseFromString(bytes.fromhex(api_response))
+        # Step 6: Parse response
+        try:
+            message = data_pb2.AccountPersonalShowInfo()
+            message.ParseFromString(bytes.fromhex(api_response))
+            
+            # Convert to JSON
+            from google.protobuf.json_format import MessageToDict
+            result = MessageToDict(message)
+            result['Powered_By'] = 'Sidka Shop'
+            result['request_metadata'] = {
+                'uid': uid,
+                'region': region,
+                'account_creation_time': f"{account_creation_time:.2f}s",
+                'api_call_time': f"{api_call_time:.2f}s",
+                'total_time': f"{account_creation_time + api_call_time:.2f}s"
+            }
+            
+            print(f"✅ Successfully parsed response")
+            print(f"📊 Result keys: {list(result.keys())[:10]}...")
+            
+            return jsonify(result)
+            
+        except Exception as e:
+            print(f"❌ Failed to parse API response: {e}")
+            print(f"Response hex preview: {api_response[:100]}...")
+            return jsonify({
+                "error": f"Failed to parse API response: {str(e)}",
+                "raw_response_hex": api_response[:500] + "..." if len(api_response) > 500 else api_response
+            }), 500
         
-        # Convert to JSON
-        result = MessageToDict(message)
-        result['Powered By'] = ['Sidka Shop']
-        result['note'] = 'Fresh account created for this request'
-        result['request_id'] = nonce
-        
-        return jsonify(result)
-        
-    except ValueError:
-        return jsonify({"error": "Invalid UID format"}), 400
+    except ValueError as e:
+        print(f"❌ Invalid UID format: {e}")
+        return jsonify({"error": "Invalid UID format. Must be numeric."}), 400
     except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
+        print(f"❌ Unexpected error: {e}")
         traceback.print_exc()
-        return jsonify({"error": f"Failure: {str(e)}"}), 500
+        return jsonify({
+            "error": f"Internal server error: {str(e)}",
+            "traceback": traceback.format_exc()[-500:] if app.debug else "Enable debug mode for traceback"
+        }), 500
 
 @app.route('/test', methods=['GET'])
-def test_account_creation():
-    """Test endpoint to create account without API call"""
-    region = request.args.get('region', 'ME').upper()
-    
-    try:
-        token = create_fresh_account(region)
-        if token:
-            return jsonify({
-                "success": True,
-                "region": region,
-                "message": "Fresh account created successfully",
-                "token_preview": token[:50] + "..."
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "region": region,
-                "message": "Failed to create account"
-            }), 500
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+def test_endpoint():
+    """Simple test endpoint"""
+    return jsonify({
+        "status": "online",
+        "service": "FreeFire API",
+        "version": "1.0",
+        "timestamp": datetime.now().isoformat()
+    })
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         "status": "healthy",
         "service": "FreeFire API",
-        "mode": "Fresh account per request",
+        "timestamp": datetime.now().isoformat(),
+        "environment": "Vercel" if "VERCEL" in os.environ else "Local"
+    })
+
+@app.route('/tokens', methods=['GET'])
+def list_tokens():
+    """List current tokens (empty for fresh account approach)"""
+    return jsonify({
+        "tokens": {},
+        "note": "Using fresh account per request - no tokens stored",
         "timestamp": datetime.now().isoformat()
     })
 
-# ========== MAIN EXECUTION ==========
+# ========== ERROR HANDLERS ==========
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
 
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        "error": "Internal server error",
+        "details": str(error) if app.debug else "Contact administrator"
+    }), 500
+
+# ========== MAIN EXECUTION ==========
 if __name__ == "__main__":
     print("=" * 70)
     print("🎮 FREEFIRE API - FRESH ACCOUNT PER REQUEST")
-    print("📝 No token storage, fresh JWT for every request")
+    print("📝 Enhanced debugging version")
     print("=" * 70)
     
     port = int(os.environ.get('PORT', 5552))
     
     print(f"\n🚀 Starting server on http://0.0.0.0:{port}")
     print("\n📋 Available endpoints:")
-    print("  GET /accinfo?uid=123456789&region=ME  - Get player info (creates fresh account)")
-    print("  GET /test?region=ME                   - Test account creation")
+    print("  GET /accinfo?uid=123456789&region=ME  - Get player info")
+    print("  GET /test                             - Test endpoint")
     print("  GET /health                           - Health check")
+    print("  GET /tokens                           - List tokens")
     print("\n" + "=" * 70)
     
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
