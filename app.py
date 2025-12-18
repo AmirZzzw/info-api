@@ -390,6 +390,198 @@ def major_login(uid, password, access_token, open_id, region):
         print(f"[ERROR] MajorLogin failed: {e}")
         return None
 
+# بعد از تابع major_login، این تابع رو اضافه کن:
+def extract_full_jwt(response_text):
+    """Extract complete JWT token from response"""
+    try:
+        import re
+        # Pattern for JWT
+        jwt_pattern = r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
+        match = re.search(jwt_pattern, response_text)
+        
+        if match:
+            jwt_token = match.group(0)
+            print(f"🔍 Extracted JWT: {jwt_token[:80]}...")
+            
+            # Decode to see what's in it
+            try:
+                parts = jwt_token.split('.')
+                if len(parts) >= 2:
+                    import base64
+                    payload_part = parts[1]
+                    padding = 4 - len(payload_part) % 4
+                    if padding != 4:
+                        payload_part += '=' * padding
+                    decoded = base64.urlsafe_b64decode(payload_part)
+                    payload = json.loads(decoded)
+                    print(f"🔍 JWT Payload: {payload}")
+            except:
+                pass
+            
+            return jwt_token
+        return None
+    except Exception as e:
+        print(f"❌ JWT extraction failed: {e}")
+        return None
+
+# تابع major_login رو آپدیت کن:
+def major_login(uid, password, access_token, open_id, region):
+    """MajorLogin to get JWT Token"""
+    try:
+        lang = REGION_LANG.get(region.upper(), "en")
+        
+        payload_parts = [
+            b'\x1a\x132025-08-30 05:19:21"\tfree fire(\x01:\x081.114.13B2Android OS 9 / API-28 (PI/rel.cjw.20220518.114133)J\x08HandheldR\nATM MobilsZ\x04WIFI`\xb6\nh\xee\x05r\x03300z\x1fARMv7 VFPv3 NEON VMH | 2400 | 2\x80\x01\xc9\x0f\x8a\x01\x0fAdreno (TM) 640\x92\x01\rOpenGL ES 3.2\x9a\x01+Google|dfa4ab4b-9dc4-454e-8065-e70c733fa53f\xa2\x01\x0e105.235.139.91\xaa\x01\x02',
+            lang.encode("ascii"),
+            b'\xb2\x01 1d8ec0240ede109973f3321b9354b44d\xba\x01\x014\xc2\x01\x08Handheld\xca\x01\x10Asus ASUS_I005DA\xea\x01@afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390\xf0\x01\x01\xca\x02\nATM Mobils\xd2\x02\x04WIFI\xca\x03 7428b253defc164018c604a1ebbfebdf\xe0\x03\xa8\x81\x02\xe8\x03\xf6\xe5\x01\xf0\x03\xaf\x13\xf8\x03\x84\x07\x80\x04\xe7\xf0\x01\x88\x04\xa8\x81\x02\x90\x04\xe7\xf0\x01\x98\x04\xa8\x81\x02\xc8\x04\x01\xd2\x04=/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/lib/arm\xe0\x04\x01\xea\x04_2087f61c19f57f2af4e7feff0b24d9d9|/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019118692\xb2\x05\tOpenGLES2\xb8\x05\xff\x7f\xc0\x05\x04\xe0\x05\xf3F\xea\x05\x07android\xf2\x05pKqsHT5ZLWrYljNb5Vqh//yFRlaPHSO9NWSQsVvOmdhEEn7W+VHNUK+Q+fduA3ptNrGB0Ll0LRz3WW0jOwesLj6aiU7sZ40p8BfUE/FI/jzSTwRe2\xf8\x05\xfb\xe4\x06\x88\x06\x01\x90\x06\x01\x9a\x06\x014\xa2\x06\x014\xb2\x06"GQ@O\x00\x0e^\x00D\x06UA\x0ePM\r\x13hZ\x07T\x06\x0cm\\V\x0ejYV;\x0bU5'
+        ]
+        
+        payload = b''.join(payload_parts)
+        
+        if region.upper() in ["ME", "TH"]:
+            url = "https://loginbp.common.ggbluefox.com/MajorLogin"
+        else:
+            url = "https://loginbp.ggblueshark.com/MajorLogin"
+        
+        headers = {
+            "Accept-Encoding": "gzip",
+            "Authorization": "Bearer",
+            "Connection": "Keep-Alive",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Expect": "100-continue",
+            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
+            "ReleaseVersion": "OB51",
+            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
+            "X-GA": "v1 1",
+            "X-Unity-Version": "2018.4.11f1"
+        }
+
+        data = payload
+        data = data.replace(b'afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390', access_token.encode())
+        data = data.replace(b'1d8ec0240ede109973f3321b9354b44d', open_id.encode())
+        
+        print(f"🔍 MajorLogin - Token: {access_token[:30]}..., OpenID: {open_id}")
+        
+        encrypted = encrypt_api(data.hex())
+        final_payload = bytes.fromhex(encrypted)
+
+        response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
+        
+        print(f"🔍 MajorLogin Status: {response.status_code}")
+        print(f"🔍 Response length: {len(response.text)}")
+        
+        if response.status_code == 200 and len(response.text) > 10:
+            # Extract JWT
+            jwt_token = extract_full_jwt(response.text)
+            
+            if jwt_token:
+                print(f"[4/4] JWT obtained (full)")
+                return {"jwt_token": jwt_token}
+            else:
+                print(f"⚠️ No JWT found in response")
+                print(f"🔍 Response preview: {response.text[:300]}")
+        
+        return None
+    except Exception as e:
+        print(f"[ERROR] MajorLogin failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+# تابع call_api_with_jwt رو آپدیت کن:
+def call_api_with_jwt(idd, region):
+    """Call API with JWT token"""
+    # Get JWT token
+    jwt_token = token_manager.get_token(region)
+    if not jwt_token:
+        raise Exception(f"Failed to get JWT token for region {region}")
+    
+    endpoint = get_api_endpoint(region)
+    
+    # Headers مختلف رو امتحان کن
+    headers_list = [
+        {
+            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+            'Connection': 'Keep-Alive',
+            'Expect': '100-continue',
+            'Authorization': f'Bearer {jwt_token}',
+            'X-Unity-Version': '2018.4.11f1',
+            'X-GA': 'v1 1',
+            'ReleaseVersion': 'OB49',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        {
+            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+            'Authorization': f'Bearer {jwt_token}',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Unity-Version': '2018.4.11f1',
+        },
+        {
+            'User-Agent': 'UnityPlayer/2018.4.11f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)',
+            'Authorization': f'Bearer {jwt_token}',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+    ]
+    
+    try:
+        data = bytes.fromhex(idd)
+        
+        for i, headers in enumerate(headers_list):
+            print(f"🔍 Trying header set {i+1}...")
+            
+            response = requests.post(
+                endpoint, 
+                headers=headers, 
+                data=data, 
+                timeout=15,
+                verify=False
+            )
+            
+            print(f"🔍 API Response Status ({i+1}): {response.status_code}")
+            
+            if response.status_code == 200:
+                print(f"✅ Success with header set {i+1}")
+                return response.content.hex()
+            elif response.status_code == 401:
+                print(f"❌ 401 with header set {i+1}")
+                # فقط continue کن به set بعدی
+                continue
+            else:
+                print(f"⚠️ Status {response.status_code} with header set {i+1}")
+        
+        # اگر همه fail شدن
+        print(f"❌ All header sets failed with 401")
+        raise Exception(f"API returned 401 with all header configurations")
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ API request failed: {e}")
+        raise
+
+# تابع get_api_endpoint رو چک کن:
+def get_api_endpoint(region):
+    """Get API endpoint based on region"""
+    region = region.upper()
+    
+    # برای region ME، چند endpoint مختلف رو امتحان کن
+    if region == "ME":
+        endpoints = [
+            "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
+            "https://client.me.freefiremobile.com/GetPlayerPersonalShow",
+            "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"  # fallback
+        ]
+        return endpoints[0]  # اولی رو امتحان کن
+    
+    endpoints = {
+        "IND": "https://client.ind.freefiremobile.com/GetPlayerPersonalShow",
+        "BR": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "US": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "SAC": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "NA": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "TH": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow",
+        "default": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+    }
+    return endpoints.get(region, endpoints["default"])
+
 def decode_jwt_token(jwt_token):
     """Decode JWT token"""
     try:
@@ -492,6 +684,58 @@ def call_api_with_jwt(idd, region):
         raise
 
 # ========== FLASK ROUTES ==========
+@app.route('/debug_jwt', methods=['GET'])
+def debug_jwt():
+    """Debug endpoint to test JWT creation"""
+    region = request.args.get('region', 'ME').upper()
+    
+    try:
+        # Create a fresh JWT
+        print(f"\n🔍 DEBUG: Creating fresh JWT for {region}")
+        
+        guest_data = create_acc(region)
+        if not guest_data:
+            return jsonify({"error": "Failed to create guest"}), 500
+        
+        token_data = token_grant(guest_data['uid'], guest_data['password'])
+        if not token_data:
+            return jsonify({"error": "Failed to get token"}), 500
+        
+        login_data = major_login(
+            guest_data['uid'], 
+            guest_data['password'], 
+            token_data['access_token'], 
+            token_data['open_id'], 
+            region
+        )
+        
+        if login_data and login_data.get('jwt_token'):
+            jwt_token = login_data['jwt_token']
+            
+            # Decode JWT
+            try:
+                parts = jwt_token.split('.')
+                payload = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (4 - len(parts[1]) % 4)))
+            except:
+                payload = {"error": "Could not decode"}
+            
+            return jsonify({
+                "success": True,
+                "jwt_token": jwt_token,
+                "jwt_parts": len(jwt_token.split('.')),
+                "token_length": len(jwt_token),
+                "payload": payload,
+                "region": region
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "Failed to get JWT"
+            }), 500
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
 @app.route('/accinfo', methods=['GET'])
 def get_player_info():
     try:
