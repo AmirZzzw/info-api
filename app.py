@@ -51,51 +51,64 @@ class TokenManager:
             # Check if we have a valid token
             if region in self.tokens:
                 token_data = self.tokens[region]
-                # Check if token is still valid (5 minutes)
+                # Check if token is still valid (10 minutes)
                 if token_data["expiry"] > now:
                     print(f"🔑 Using cached JWT token for {region}")
                     return token_data["token"]
             
             # Create new token
-            print(f"🔄 No valid token for {region}, creating fresh JWT...")
-            token = self._create_jwt_token(region)
+            print(f"🔄 No valid token for {region}, creating fresh...")
+            token = self._create_fresh_jwt(region)
             if token:
-                # Store for 5 minutes (JWT tokens expire fast)
+                # Store for 10 minutes
                 self.tokens[region] = {
                     "token": token,
-                    "expiry": now + 300  # 5 minutes
+                    "expiry": now + 600  # 10 minutes
                 }
                 print(f"✅ JWT Token stored for {region}")
                 return token
             return None
     
-    def _create_jwt_token(self, region):
-        """Create a JWT token using major_login"""
+    def _create_fresh_jwt(self, region):
+        """Create a fresh JWT token"""
         try:
-            print(f"🔄 Step 1: Creating guest account for {region}")
+            print(f"🔄 Creating fresh account for {region}")
+            
             # Step 1: Create guest account
             guest_data = create_acc(region)
             if not guest_data:
                 print("❌ Failed to create guest account")
                 return None
             
-            print(f"🔄 Step 2: Getting access token")
             # Step 2: Get access token
             token_data = token_grant(guest_data['uid'], guest_data['password'])
             if not token_data:
                 print("❌ Failed to get access token")
                 return None
             
-            print(f"🔄 Step 3: MajorLogin for JWT")
-            # Step 3: MajorLogin for JWT
-            login_data = major_login_simple(
+            # Step 3: MajorRegister
+            print(f"🔄 Registering account...")
+            register_result = major_register(
+                token_data['access_token'], 
+                token_data['open_id'], 
+                region
+            )
+            
+            if not register_result:
+                print("⚠️ MajorRegister failed, but continuing...")
+            
+            # Step 4: MajorLogin for JWT
+            print(f"🔄 Logging in for JWT...")
+            login_data = major_login(
+                guest_data['uid'], 
+                guest_data['password'], 
                 token_data['access_token'], 
                 token_data['open_id'], 
                 region
             )
             
             if login_data and login_data.get('jwt_token'):
-                print(f"✅ JWT Token created successfully for {region}")
+                print(f"✅ JWT Token obtained")
                 return login_data['jwt_token']
             
             print(f"❌ Failed to get JWT token")
@@ -103,91 +116,14 @@ class TokenManager:
             
         except Exception as e:
             print(f"❌ JWT creation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 # ایجاد global instance
 token_manager = TokenManager()
 
-# ========== SIMPLIFIED MAJOR LOGIN ==========
-def major_login_simple(access_token, open_id, region):
-    """Simplified version of major_login"""
-    try:
-        lang = REGION_LANG.get(region.upper(), "en")
-        
-        # Create a simple payload
-        payload = {
-            "access_token": access_token,
-            "open_id": open_id,
-            "region": region,
-            "lang": lang,
-            "client_type": 2,
-            "platform": "android"
-        }
-        
-        if region.upper() in ["ME", "TH"]:
-            url = "https://loginbp.common.ggbluefox.com/MajorLogin"
-        else:
-            url = "https://loginbp.ggblueshark.com/MajorLogin"
-        
-        headers = {
-            "Accept-Encoding": "gzip",
-            "Authorization": "Bearer",
-            "Connection": "Keep-Alive",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Expect": "100-continue",
-            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
-            "ReleaseVersion": "OB51",
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
-            "X-GA": "v1 1",
-            "X-Unity-Version": "2018.4.11f1"
-        }
-
-        # Convert payload to protobuf format
-        payload_bytes = CrEaTe_ProTo({
-            2: access_token,
-            3: open_id,
-            5: 102000007,
-            6: 4,
-            7: 1,
-            13: 1,
-            15: lang,
-            16: 1,
-            17: 1
-        })
-        
-        encrypted_payload = binascii.hexlify(payload_bytes).decode()
-        encrypted_data = encrypt_api(encrypted_payload)
-        final_payload = bytes.fromhex(encrypted_data)
-
-        response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
-        
-        print(f"🔍 MajorLogin Status: {response.status_code}")
-        
-        if response.status_code == 200 and len(response.text) > 10:
-            # Try to find JWT token in response
-            response_text = response.text
-            
-            # Look for JWT pattern
-            import re
-            jwt_pattern = r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
-            match = re.search(jwt_pattern, response_text)
-            
-            if match:
-                jwt_token = match.group(0)
-                print(f"✅ Found JWT token: {jwt_token[:50]}...")
-                return {"jwt_token": jwt_token}
-            else:
-                print(f"⚠️ No JWT found in response, using access_token as fallback")
-                # Return access_token as fallback
-                return {"jwt_token": access_token}
-        
-        return None
-        
-    except Exception as e:
-        print(f"❌ MajorLogin failed: {e}")
-        return None
-
-# ========== BASIC ACCOUNT FUNCTIONS ==========
+# ========== ACCOUNT FUNCTIONS ==========
 def generate_random_name(base_name):
     """Generate name with exponent numbers"""
     exponent_digits = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', 
@@ -253,6 +189,22 @@ def encrypt_api(plain_text):
     cipher_text = cipher.encrypt(pad(plain_text, AES.block_size))
     return cipher_text.hex()
 
+def encode_string(original):
+    """Encode string for field_14"""
+    keystream = [0x30, 0x30, 0x30, 0x32, 0x30, 0x31, 0x37, 0x30, 0x30, 0x30, 0x30, 0x30, 0x32, 0x30, 0x31, 0x37,
+                 0x30, 0x30, 0x30, 0x30, 0x30, 0x32, 0x30, 0x31, 0x37, 0x30, 0x30, 0x30, 0x30, 0x30, 0x32, 0x30]
+    encoded = ""
+    for i in range(len(original)):
+        orig_byte = ord(original[i])
+        key_byte = keystream[i % len(keystream)]
+        result_byte = orig_byte ^ key_byte
+        encoded += chr(result_byte)
+    return {"open_id": original, "field_14": encoded}
+
+def to_unicode_escaped(s):
+    """Convert to unicode escaped"""
+    return ''.join(c if 32 <= ord(c) <= 126 else f'\\u{ord(c):04x}' for c in s)
+
 def create_acc(region, max_retries=3):
     """Create guest account"""
     for attempt in range(max_retries):
@@ -277,7 +229,7 @@ def create_acc(region, max_retries=3):
                 result = response.json()
                 if 'uid' in result:
                     uid = result['uid']
-                    print(f"[1/3] Guest account created: {uid}")
+                    print(f"[1/4] Guest account created: {uid}")
                     return {"uid": uid, "password": password}
             else:
                 print(f"[ATTEMPT {attempt + 1}/{max_retries}] Create account failed: {response.status_code}")
@@ -317,12 +269,144 @@ def token_grant(uid, password):
         if 'open_id' in response.json():
             open_id = response.json()['open_id']
             access_token = response.json()["access_token"]
-            print(f"[2/3] Access token granted: {access_token[:30]}...")
+            print(f"[2/4] Token granted: {access_token[:30]}...")
             return {"access_token": access_token, "open_id": open_id}
         return None
     except Exception as e:
         print(f"[ERROR] Token grant failed: {e}")
         return None
+
+def major_register(access_token, open_id, region):
+    """MajorRegister"""
+    try:
+        if region.upper() in ["ME", "TH"]:
+            url = "https://loginbp.common.ggbluefox.com/MajorRegister"
+        else:
+            url = "https://loginbp.ggblueshark.com/MajorRegister"
+        
+        name = generate_random_name(ACCOUNT_NAME_PREFIX)
+        
+        headers = {
+            "Accept-Encoding": "gzip",
+            "Authorization": "Bearer",   
+            "Connection": "Keep-Alive",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Expect": "100-continue",
+            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
+            "ReleaseVersion": "OB51",
+            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
+            "X-GA": "v1 1",
+            "X-Unity-Version": "2018.4."
+        }
+
+        lang_code = REGION_LANG.get(region.upper(), "en")
+        payload = {
+            1: name,
+            2: access_token,
+            3: open_id,
+            5: 102000007,
+            6: 4,
+            7: 1,
+            13: 1,
+            14: codecs.decode(to_unicode_escaped(encode_string(open_id)['field_14']), 'unicode_escape').encode('latin1'),
+            15: lang_code,
+            16: 1,
+            17: 1
+        }
+
+        payload_bytes = CrEaTe_ProTo(payload)
+        encrypted_payload = binascii.hexlify(payload_bytes).decode()
+        
+        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypt_api(encrypted_payload)), verify=False, timeout=30)
+        
+        if response.status_code == 200:
+            print(f"[3/4] Registered: {name}")
+            return {"name": name}
+        else:
+            print(f"[WARNING] Register status: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"[ERROR] Register error: {e}")
+        return None
+
+def major_login(uid, password, access_token, open_id, region):
+    """MajorLogin to get JWT Token"""
+    try:
+        lang = REGION_LANG.get(region.upper(), "en")
+        
+        payload_parts = [
+            b'\x1a\x132025-08-30 05:19:21"\tfree fire(\x01:\x081.114.13B2Android OS 9 / API-28 (PI/rel.cjw.20220518.114133)J\x08HandheldR\nATM MobilsZ\x04WIFI`\xb6\nh\xee\x05r\x03300z\x1fARMv7 VFPv3 NEON VMH | 2400 | 2\x80\x01\xc9\x0f\x8a\x01\x0fAdreno (TM) 640\x92\x01\rOpenGL ES 3.2\x9a\x01+Google|dfa4ab4b-9dc4-454e-8065-e70c733fa53f\xa2\x01\x0e105.235.139.91\xaa\x01\x02',
+            lang.encode("ascii"),
+            b'\xb2\x01 1d8ec0240ede109973f3321b9354b44d\xba\x01\x014\xc2\x01\x08Handheld\xca\x01\x10Asus ASUS_I005DA\xea\x01@afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390\xf0\x01\x01\xca\x02\nATM Mobils\xd2\x02\x04WIFI\xca\x03 7428b253defc164018c604a1ebbfebdf\xe0\x03\xa8\x81\x02\xe8\x03\xf6\xe5\x01\xf0\x03\xaf\x13\xf8\x03\x84\x07\x80\x04\xe7\xf0\x01\x88\x04\xa8\x81\x02\x90\x04\xe7\xf0\x01\x98\x04\xa8\x81\x02\xc8\x04\x01\xd2\x04=/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/lib/arm\xe0\x04\x01\xea\x04_2087f61c19f57f2af4e7feff0b24d9d9|/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019118692\xb2\x05\tOpenGLES2\xb8\x05\xff\x7f\xc0\x05\x04\xe0\x05\xf3F\xea\x05\x07android\xf2\x05pKqsHT5ZLWrYljNb5Vqh//yFRlaPHSO9NWSQsVvOmdhEEn7W+VHNUK+Q+fduA3ptNrGB0Ll0LRz3WW0jOwesLj6aiU7sZ40p8BfUE/FI/jzSTwRe2\xf8\x05\xfb\xe4\x06\x88\x06\x01\x90\x06\x01\x9a\x06\x014\xa2\x06\x014\xb2\x06"GQ@O\x00\x0e^\x00D\x06UA\x0ePM\r\x13hZ\x07T\x06\x0cm\\V\x0ejYV;\x0bU5'
+        ]
+        
+        payload = b''.join(payload_parts)
+        
+        if region.upper() in ["ME", "TH"]:
+            url = "https://loginbp.common.ggbluefox.com/MajorLogin"
+        else:
+            url = "https://loginbp.ggblueshark.com/MajorLogin"
+        
+        headers = {
+            "Accept-Encoding": "gzip",
+            "Authorization": "Bearer",
+            "Connection": "Keep-Alive",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Expect": "100-continue",
+            "Host": "loginbp.ggblueshark.com" if region.upper() not in ["ME", "TH"] else "loginbp.common.ggbluefox.com",
+            "ReleaseVersion": "OB51",
+            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
+            "X-GA": "v1 1",
+            "X-Unity-Version": "2018.4.11f1"
+        }
+
+        data = payload
+        data = data.replace(b'afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390', access_token.encode())
+        data = data.replace(b'1d8ec0240ede109973f3321b9354b44d', open_id.encode())
+        
+        print(f"🔍 MajorLogin - Token: {access_token[:30]}..., OpenID: {open_id[:20]}...")
+        
+        encrypted = encrypt_api(data.hex())
+        final_payload = bytes.fromhex(encrypted)
+
+        response = requests.post(url, headers=headers, data=final_payload, verify=False, timeout=30)
+        
+        print(f"🔍 MajorLogin Status: {response.status_code}")
+        print(f"🔍 Response preview: {response.text[:200]}")
+        
+        if response.status_code == 200 and len(response.text) > 10:
+            # Look for JWT
+            import re
+            jwt_pattern = r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
+            match = re.search(jwt_pattern, response.text)
+            
+            if match:
+                jwt_token = match.group(0)
+                print(f"[4/4] JWT obtained: {jwt_token[:50]}...")
+                return {"jwt_token": jwt_token}
+        
+        return None
+    except Exception as e:
+        print(f"[ERROR] MajorLogin failed: {e}")
+        return None
+
+def decode_jwt_token(jwt_token):
+    """Decode JWT token"""
+    try:
+        parts = jwt_token.split('.')
+        if len(parts) >= 2:
+            payload_part = parts[1]
+            padding = 4 - len(payload_part) % 4
+            if padding != 4:
+                payload_part += '=' * padding
+            decoded = base64.urlsafe_b64decode(payload_part)
+            data = json.loads(decoded)
+            account_id = data.get('account_id') or data.get('external_id')
+            if account_id:
+                return str(account_id)
+    except Exception as e:
+        print(f"[WARNING] JWT decode failed: {e}")
+    return "N/A"
 
 # ========== API FUNCTIONS ==========
 def get_api_endpoint(region):
@@ -368,7 +452,6 @@ def call_api_with_jwt(idd, region):
     try:
         data = bytes.fromhex(idd)
         
-        # First attempt
         response = requests.post(
             endpoint, 
             headers=headers, 
@@ -379,10 +462,9 @@ def call_api_with_jwt(idd, region):
         
         print(f"🔍 API Response Status: {response.status_code}")
         
-        # If 401, refresh token and retry
+        # If 401, clear token and retry once
         if response.status_code == 401:
-            print(f"⚠️ JWT Token expired for {region}, refreshing...")
-            # Delete old token
+            print(f"⚠️ Token invalid for {region}, clearing cache...")
             with token_manager.lock:
                 if region in token_manager.tokens:
                     del token_manager.tokens[region]
@@ -400,7 +482,7 @@ def call_api_with_jwt(idd, region):
                 )
         
         if response.status_code != 200:
-            print(f"❌ API Error {response.status_code}: {response.text[:200]}")
+            print(f"❌ API Error {response.status_code}")
             raise Exception(f"API returned {response.status_code}")
             
         return response.content.hex()
@@ -419,7 +501,7 @@ def get_player_info():
         if not uid:
             return jsonify({"error": "UID parameter is required"}), 400
         
-        print(f"\n🎯 NEW REQUEST - UID: {uid}, Region: {region}")
+        print(f"\n🎯 REQUEST - UID: {uid}, Region: {region}")
         
         # Create protobuf message
         message = uid_generator_pb2.uid_generator()
@@ -431,8 +513,8 @@ def get_player_info():
         # Encrypt the data
         encrypted_hex = encrypt_aes(hex_data)
         
-        # Call API با JWT token
-        print(f"📡 Calling API with JWT token for {region}...")
+        # Call API
+        print(f"📡 Calling API...")
         api_response = call_api_with_jwt(encrypted_hex, region)
         
         if not api_response:
@@ -445,7 +527,6 @@ def get_player_info():
         # Convert to JSON
         result = MessageToDict(message)
         result['Powered By'] = ['Sidka Shop']
-        result['token_type'] = 'jwt_token'
         
         return jsonify(result)
         
@@ -457,22 +538,18 @@ def get_player_info():
 
 @app.route('/test', methods=['GET'])
 def test_endpoint():
-    """تست JWT token creation"""
+    """Test endpoint"""
     region = request.args.get('region', 'ME').upper()
     
     try:
         token = token_manager.get_token(region)
         if token:
-            # Check if it looks like a JWT
-            is_jwt = token.count('.') == 2
-            
             return jsonify({
                 "success": True,
                 "region": region,
-                "message": "JWT system working" if is_jwt else "Token system working",
                 "has_token": True,
-                "is_jwt": is_jwt,
-                "token_preview": token[:50] + "..."
+                "token_preview": token[:50] + "...",
+                "is_jwt": token.count('.') == 2
             })
         else:
             return jsonify({
@@ -488,7 +565,6 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "FreeFire API",
-        "mode": "JWT Token System",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -496,16 +572,14 @@ def health():
 if __name__ == "__main__":
     print("=" * 70)
     print("🚀 FREEFIRE API - JWT TOKEN SYSTEM")
-    print("✅ JWT tokens cached for 5 minutes")
-    print("✅ Proper authentication flow")
     print("=" * 70)
     
     port = int(os.environ.get('PORT', 5552))
     
     print(f"\n📡 Starting on http://0.0.0.0:{port}")
     print("\n📋 Endpoints:")
-    print("  GET /accinfo?uid=...&region=...  - Player info with JWT")
-    print("  GET /test?region=ME              - Test JWT system")
+    print("  GET /accinfo?uid=...&region=...  - Player info")
+    print("  GET /test?region=ME              - Test token")
     print("  GET /health                      - Health check")
     print("\n" + "=" * 70)
     
