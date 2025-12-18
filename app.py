@@ -405,6 +405,37 @@ def call_api_with_fresh_token(idd, region):
 
 # ========== FLASK ROUTES ==========
 
+# ========== TOKEN STORAGE ==========
+TOKEN_STORE = {}  # {region: {"token": "...", "created_at": timestamp, "account_id": "..."}}
+
+def get_or_create_token(region):
+    """Get existing token or create new one if expired"""
+    region = region.upper()
+    
+    # اگر توکن برای این منطقه وجود داره و هنوز معتبره
+    if region in TOKEN_STORE:
+        token_data = TOKEN_STORE[region]
+        # چک کن ببین توکن هنوز معتبره (مثلاً کمتر از ۵ دقیقه از ساختش گذشته)
+        if time.time() - token_data["created_at"] < 300:  # ۵ دقیقه
+            print(f"✅ Using existing token for {region} (age: {int(time.time() - token_data['created_at'])}s)")
+            return token_data["token"]
+    
+    # اگر توکن نداریم یا منقضی شده، جدید بساز
+    print(f"🔄 Creating fresh token for {region}")
+    token = create_fresh_account(region)
+    
+    if token:
+        TOKEN_STORE[region] = {
+            "token": token,
+            "created_at": time.time(),
+            "region": region
+        }
+        print(f"✅ Token created and stored for {region}")
+        return token
+    
+    return None
+
+# ========== UPDATE get_player_info ==========
 @app.route('/accinfo', methods=['GET'])
 def get_player_info():
     try:
@@ -414,36 +445,24 @@ def get_player_info():
         if not uid:
             return jsonify({"error": "UID parameter is required"}), 400
         
-        # **حذف کش احتمالی**
-        import flask
-        flask.g.pop('cached_token', None)  # اگر تو g ذخیره شده
+        # Step 1: Get or create token
+        print(f"\n🎮 REQUEST - UID: {uid}, Region: {region}")
+        token = get_or_create_token(region)
         
-        # **اضافه کردن پارامتر unique برای جلوگیری از کش**
-        import time
-        import random
-        nonce = str(int(time.time())) + str(random.randint(1000, 9999))
+        if not token:
+            return jsonify({"error": "Failed to get/create token"}), 500
         
-        print(f"\n🆕 NEW REQUEST - UID: {uid}, Region: {region}, Nonce: {nonce}")
-        print("🔄 Forcing fresh account creation...")
-        
-        # Create protobuf message
+        # Step 2: Create protobuf message
         message = uid_generator_pb2.uid_generator()
         message.saturn_ = int(uid)
         message.garena = 1
         protobuf_data = message.SerializeToString()
         hex_data = binascii.hexlify(protobuf_data).decode()
         
-        # Encrypt the data
+        # Step 3: Encrypt the data
         encrypted_hex = encrypt_aes(hex_data)
         
-        # **همیشه اکانت جدید بساز**
-        print(f"🔐 Creating fresh account for {region}...")
-        token = create_fresh_account(region)
-        
-        if not token:
-            return jsonify({"error": "Failed to create fresh account"}), 500
-            
-        # حالا با توکن جدید API رو صدا بزن
+        # Step 4: Call API with token
         endpoint = get_api_endpoint(region)
         headers = {
             'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
@@ -456,9 +475,32 @@ def get_player_info():
             'Content-Type': 'application/x-www-form-urlencoded',
         }
         
-        print(f"📡 Calling API endpoint: {endpoint}")
+        print(f"📡 Calling API with existing token...")
         response = requests.post(endpoint, headers=headers, 
                                data=bytes.fromhex(encrypted_hex), timeout=30)
+        
+        # Step 5: Handle 401 errors (token expired)
+        if response.status_code == 401:
+            print(f"🔐 Token expired (401), creating new one...")
+            # حذف توکن منقضی شده
+            if region in TOKEN_STORE:
+                del TOKEN_STORE[region]
+            
+            # توکن جدید بساز
+            token = create_fresh_account(region)
+            if not token:
+                return jsonify({"error": "Failed to create new token after 401"}), 500
+            
+            TOKEN_STORE[region] = {
+                "token": token,
+                "created_at": time.time(),
+                "region": region
+            }
+            
+            # دوباره با توکن جدید امتحان کن
+            headers['Authorization'] = f'Bearer {token}'
+            response = requests.post(endpoint, headers=headers, 
+                                   data=bytes.fromhex(encrypted_hex), timeout=30)
         
         if response.status_code != 200:
             return jsonify({"error": f"API failed: {response.status_code}"}), 500
@@ -472,18 +514,31 @@ def get_player_info():
         # Convert to JSON
         result = MessageToDict(message)
         result['Powered By'] = ['Sidka Shop']
-        result['note'] = 'Fresh account created for this request'
-        result['request_id'] = nonce
+        result['note'] = f'Using token created at {datetime.now().isoformat()}'
+        result['token_age'] = f"{int(time.time() - TOKEN_STORE.get(region, {}).get('created_at', 0))}s"
         
         return jsonify(result)
         
     except ValueError:
         return jsonify({"error": "Invalid UID format"}), 400
     except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
         return jsonify({"error": f"Failure: {str(e)}"}), 500
+
+# ========== ADD TOKEN INFO ENDPOINT ==========
+@app.route('/token_status', methods=['GET'])
+def token_status():
+    """Show current token status"""
+    status = {}
+    for region, data in TOKEN_STORE.items():
+        age = int(time.time() - data["created_at"])
+        status[region] = {
+            "age_seconds": age,
+            "age_minutes": age // 60,
+            "is_expired": age > 300,  # ۵ دقیقه
+            "token_preview": data["token"][:30] + "..."
+        }
+    return jsonify(status)
 
 @app.route('/test', methods=['GET'])
 def test_account_creation():
