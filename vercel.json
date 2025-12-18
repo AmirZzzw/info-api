@@ -3,26 +3,13 @@
   "builds": [
     {
       "src": "app.py",
-      "use": "@vercel/python",
-      "config": {
-        "maxDuration": 30,
-        "memory": 3008
-      }
+      "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "app.py",
-      "headers": {
-        "Cache-Control": "no-cache, no-store, must-revalidate"
-      }
+      "dest": "app.py"
     }
-  ],
-  "functions": {
-    "app.py": {
-      "maxDuration": 30,
-      "memory": 3008
-    }
-  }
+  ]
 }
