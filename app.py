@@ -129,12 +129,10 @@ def call_api_with_jwt(idd, region):
 def get_player_info():
     try:
         uid = request.args.get('uid')
+        region = request.args.get('region', 'ME').upper()
         
         if not uid:
             return jsonify({"error": "UID parameter is required"}), 400
-        
-        # منطقه رو همیشه US قرار بده (مهم!)
-        region = "US"
         
         # Create protobuf message
         message = uid_generator_pb2.uid_generator()
@@ -146,7 +144,7 @@ def get_player_info():
         # Encrypt the data
         encrypted_hex = encrypt_aes(hex_data)
         
-        # Call API with US region
+        # Call API with JWT from GitHub
         print(f"\n📡 Processing request for UID: {uid}, Region: {region}")
         api_response = call_api_with_jwt(encrypted_hex, region)
         
@@ -160,7 +158,7 @@ def get_player_info():
         # Convert to JSON
         result = MessageToDict(message)
         result['Powered By'] = ['Sidka Shop']
-        result['note'] = 'JWT for NA region (Canada server)'
+        result['note'] = 'JWT token loaded from GitHub repository'
         
         return jsonify(result)
         
