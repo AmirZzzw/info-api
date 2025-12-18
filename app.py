@@ -298,6 +298,36 @@ def major_login(uid, password, access_token, open_id, region):
         print(f"[ERROR] MajorLogin failed: {e}")
         return {"jwt_token": "", "account_id": "N/A"}
 
+def get_api_token(jwt_token, region):
+    """Get specific token for GetPlayerPersonalShow API"""
+    try:
+        if region.upper() in ["ME", "TH"]:
+            url = "https://clientbp.common.ggbluefox.com/GetToken"
+        else:
+            url = "https://clientbp.ggblueshark.com/GetToken"
+        
+        headers = {
+            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+            'Connection': 'Keep-Alive',
+            'Authorization': f'Bearer {jwt_token}',
+            'X-Unity-Version': '2018.4.11f1',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+        
+        # داده خالی بفرست
+        response = requests.post(url, headers=headers, data=b'', timeout=10, verify=False)
+        
+        if response.status_code == 200 and response.text:
+            print(f"[5/5] API token obtained")
+            return response.text.strip()  # این توکن اصلیه
+        else:
+            print(f"[WARNING] GetToken failed: {response.status_code}")
+            return jwt_token  # fallback به توکن اصلی
+    
+    except Exception as e:
+        print(f"[ERROR] Get API token failed: {e}")
+        return jwt_token  # fallback
+        
 def decode_jwt_token(jwt_token):
     """Decode account_id from JWT token"""
     try:
@@ -317,36 +347,38 @@ def decode_jwt_token(jwt_token):
     return "N/A"
 
 def create_fresh_account(region):
-    """Create a fresh account and get JWT token"""
+    """Create a fresh account and get PROPER API token"""
     print(f"\n{'='*50}")
     print(f"CREATING FRESH ACCOUNT FOR REGION: {region}")
     print(f"{'='*50}")
     
     try:
-        # Step 1: Create guest account
+        # Step 1-4: مثل قبل
         guest_data = create_acc(region)
         if not guest_data:
             raise Exception("Failed to create guest account")
         
-        # Step 2: Get access token
         token_data = token_grant(guest_data['uid'], guest_data['password'])
         if not token_data:
             raise Exception("Failed to get access token")
         
-        # Step 3: MajorRegister
         register_data = major_register(token_data['access_token'], token_data['open_id'], region)
         if not register_data:
             print("[WARNING] MajorRegister failed, continuing...")
         
-        # Step 4: MajorLogin for JWT
         login_data = major_login(guest_data['uid'], guest_data['password'], 
                                token_data['access_token'], token_data['open_id'], region)
         
-        if login_data and login_data['jwt_token']:
-            print(f"[SUCCESS] Fresh JWT token created for {region}")
-            return login_data['jwt_token']
-        else:
+        if not login_data or not login_data['jwt_token']:
             raise Exception("Failed to get JWT token")
+        
+        print(f"[SUCCESS] Fresh JWT token created for {region}")
+        
+        # Step 5: Get PROPER API token
+        print(f"[5/5] Getting API-specific token...")
+        api_token = get_api_token(login_data['jwt_token'], region)
+        
+        return api_token  # این توکن اصلی برای API هست
             
     except Exception as e:
         print(f"[ERROR] Failed to create fresh account: {e}")
